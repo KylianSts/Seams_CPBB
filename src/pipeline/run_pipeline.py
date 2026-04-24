@@ -173,6 +173,7 @@ def process_video(
     enable_audio: bool = True,
     enable_ar: bool = True,
     enable_sam: bool = True,
+    enable_supervisor: bool = False,
 ) -> None:
 
     # =======================================================================
@@ -194,7 +195,7 @@ def process_video(
     tracker = load_tracker(device=device)
 
     # --- Superviseur de Tracking (Anti ID-Switch) ---
-    supervisor = TrackSupervisor(gmm_veto_threshold=0.75)
+    supervisor = TrackSupervisor(gmm_veto_threshold=0.75) if enable_supervisor else None
 
     # --- Modèle de segmentation (SAM 2.1) ---
     seg_config    = None
@@ -705,6 +706,12 @@ if __name__ == "__main__":
         "--no-sam",   action="store_true",
         help="Désactiver la segmentation SAM2"
     )
+
+    parser.add_argument(
+        "--no-veto",  action="store_true",
+        help="Désactiver le superviseur de tracking (Veto GMM)"
+    )
+
     args = parser.parse_args()
 
     output = args.output or args.video.parent / (args.video.stem + "_demo_v0.mp4")
