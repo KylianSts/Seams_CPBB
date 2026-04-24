@@ -29,13 +29,6 @@ class PlayerState:
     speed_kmh: float = 0.0
     accel_ms2: float = 0.0
 
-    # Dans MatchState, ajoute :
-    # Structure : {team_id: {"avg_speed": 0.0, "std_speed": 0.0, "avg_accel": 0.0, ...}}
-    team_metrics: Dict[int, Dict[str, float]] = field(default_factory=lambda: {
-        0: {"avg_speed": 0.0, "std_speed": 0.0, "avg_accel": 0.0, "std_accel": 0.0},
-        1: {"avg_speed": 0.0, "std_speed": 0.0, "avg_accel": 0.0, "std_accel": 0.0}
-    })
-
 
 @dataclass
 class CameraState:
@@ -109,3 +102,9 @@ class MatchState:
     # ===========================================================================
     avg_speed_kmh: float = 0.0
     std_speed_kmh: float = 0.0
+
+    # Structure : {team_id: {"avg_speed": 0.0, "std_speed": 0.0, "avg_accel": 0.0, ...}}
+    team_metrics: Dict[int, Dict[str, float]] = field(default_factory=lambda: {
+        0: {"avg_speed": 0.0, "std_speed": 0.0, "avg_accel": 0.0, "std_accel": 0.0},
+        1: {"avg_speed": 0.0, "std_speed": 0.0, "avg_accel": 0.0, "std_accel": 0.0}
+    })
