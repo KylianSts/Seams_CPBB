@@ -87,7 +87,7 @@ def update_players_tracking(
     player_detections: List[Tuple[float, float, float, float, float]],
     frame: np.ndarray,
     state: MatchState,
-    max_lost_frames: int = 6   # ~200ms à 30fps
+    max_lost_frames: int = 20   # ~200ms à 30fps
 ) -> MatchState:
     """
     Met à jour state.players avec les IDs et positions des joueurs.
