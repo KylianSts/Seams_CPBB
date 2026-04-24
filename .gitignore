@@ -1,0 +1,6 @@
+seams.venv
+data/datasets/
+data/demos/
+data/raw/
+models/
+tests/
