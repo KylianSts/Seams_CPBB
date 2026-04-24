@@ -280,21 +280,26 @@ def build_top_hud(total_width: int, state: MatchState) -> np.ndarray:
     return hud
 
 # ===========================================================================
-# 3. MINIMAP (Barre latérale droite)
+# 3. SIDEBAR DROITE (Minimap Horizontale + Futur Dashboard)
 # ===========================================================================
 
 def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarray:
     """
-    Génère la barre latérale avec la minimap 2D complète du terrain FIBA.
-    Prend toute la hauteur de l'écran, avec le compteur de joueurs en haut.
+    Génère la barre latérale droite.
+    Haut : Minimap 2D horizontale.
+    Bas : Espace réservé pour le futur Dashboard.
     """
     sidebar = np.full((sidebar_h, sidebar_w, 3), C_BG_DARK, dtype=np.uint8)
 
-    # Marges et échelle
-    mg_x, mg_y = 20, 80  # Marge supérieure agrandie pour laisser respirer l'en-tête
-    sc = (sidebar_h - mg_y * 1.5) / COURT_L  # Ajustement de l'échelle à la nouvelle hauteur totale
-    court_px_w = int(COURT_W * sc)
-    court_px_h = int(COURT_L * sc)
+    # Marges
+    mg_x = 20
+    mg_y = 60  # Espace pour le titre en haut
+
+    # --- Calcul de l'échelle (Horizontal) ---
+    # On fitte la longueur du terrain (28m) dans la largeur de la sidebar
+    sc = (sidebar_w - (mg_x * 2)) / COURT_L
+    court_px_w = int(COURT_L * sc)
+    court_px_h = int(COURT_W * sc)
 
     # Fond du terrain
     cv2.rectangle(sidebar,
@@ -302,82 +307,64 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
                   (mg_x + court_px_w, mg_y + court_px_h),
                   C_COURT, -1)
 
-    # --- En-tête : Titre + Statistiques Globales ---
-    title_y = 40
-    title_txt = "DASHBOARD TACTIQUE"
+    # --- En-tête : Titre + Statistiques ---
+    title_y = 35
+    title_txt = "MINIMAP & DASHBOARD"
     cv2.putText(sidebar, title_txt, (mg_x, title_y),
                 FONT_MONO, 0.5, (240, 240, 245), 1, cv2.LINE_AA)
     
-    # Formatage des statistiques avec 1 chiffre après la virgule
     stats_txt = (
         f"| PLYRS: {len(state.players)} "
         f"| AVG_SPD: {state.avg_speed_kmh:.1f} KM/H "
         f"| STD_DEV: {state.std_speed_kmh:.1f}"
     )
-    
     tw_title = cv2.getTextSize(title_txt, FONT_MONO, 0.5, 1)[0][0]
-    
-    # Affichage du bloc de statistiques à côté du titre
     cv2.putText(sidebar, stats_txt, (mg_x + tw_title + 15, title_y),
                 FONT_MONO, 0.42, C_WARN, 1, cv2.LINE_AA)
 
-    # Épaisseur des lignes
     lw = max(1, round(sc * 0.035))
 
-    # --- SYMÉTRIE HORIZONTALE ---
+    # --- PROJECTION HORIZONTALE ---
     def court_to_px(x_m, y_m):
-        """Convertit (X_mètres, Y_mètres) en pixels avec Flip Horizontal."""
-        # On inverse l'axe Y (15m) pour corriger l'effet miroir de la caméra
-        flipped_y = COURT_W - y_m 
-        
-        px = int(flipped_y * sc) + mg_x
-        py = int(x_m * sc) + mg_y
+        """
+        L'axe X_m (28m) s'étend de gauche à droite.
+        L'axe Y_m (15m) s'étend de haut en bas.
+        """
+        # On peut inverser Y si le terrain paraît "à l'envers" par rapport à la vidéo
+        # flipped_y = COURT_W - y_m  <- Décommente si les paniers haut/bas sont inversés
+        px = int(x_m * sc) + mg_x
+        py = int(y_m * sc) + mg_y
         return px, py
 
     def pline(pts, closed=False):
-        """Dessine une ligne brisée à partir de coordonnées en mètres."""
         pts_px = np.array([court_to_px(p[0], p[1]) for p in pts], dtype=np.int32)
         cv2.polylines(sidebar, [pts_px.reshape(-1, 1, 2)], closed, C_LINE, lw, cv2.LINE_AA)
 
     # ==========================================
-    # DESSIN DU TERRAIN FIBA (Mesures officielles)
+    # DESSIN DU TERRAIN FIBA
     # ==========================================
-    
-    # 1. Lignes de touche (Contour)
     pline([[0, 0], [COURT_L, 0], [COURT_L, COURT_W], [0, COURT_W]], closed=True)
-    
-    # 2. Ligne médiane
     pline([[14.0, 0.0], [14.0, COURT_W]])
-
-    # 3. Cercle central (Rayon 1.8m)
     cx, cy = court_to_px(14.0, 7.5)
     cv2.circle(sidebar, (cx, cy), int(1.8 * sc), C_LINE, lw, cv2.LINE_AA)
-
-    # 4. Raquettes / Key (Rectangle 5.8m x 4.9m)
-    # Zone gauche
+    
     pline([[0, 5.05], [5.8, 5.05], [5.8, 9.95], [0, 9.95]], closed=True)
-    # Zone droite
     pline([[28.0, 5.05], [22.2, 5.05], [22.2, 9.95], [28.0, 9.95]], closed=True)
-
-    # 5. Cercles des lancers francs (Rayon 1.8m)
+    
     cx_lf_l, cy_lf_l = court_to_px(5.8, 7.5)
     cv2.circle(sidebar, (cx_lf_l, cy_lf_l), int(1.8 * sc), C_LINE, lw, cv2.LINE_AA)
     cx_lf_r, cy_lf_r = court_to_px(22.2, 7.5)
     cv2.circle(sidebar, (cx_lf_r, cy_lf_r), int(1.8 * sc), C_LINE, lw, cv2.LINE_AA)
-
-    # 6. Ligne à 3 points (Arc de cercle + Lignes droites)
+    
     arc_angles = np.linspace(-1.36, 1.36, 25)
     arc_left = [[1.575 + 6.75 * np.cos(a), 7.5 + 6.75 * np.sin(a)] for a in arc_angles]
     line_3pt_left = [[0.0, 0.9], [2.99, 0.9]] + arc_left + [[2.99, 14.1], [0.0, 14.1]]
     pline(line_3pt_left, closed=False)
-
-    # Symétrie mathématique pour la ligne à 3 points droite
     line_3pt_right = [[28.0 - p[0], p[1]] for p in line_3pt_left]
     pline(line_3pt_right, closed=False)
-
-    # 7. Paniers et Planches
-    pline([[1.2, 6.9], [1.2, 8.1]]) # Planche gauche
-    pline([[26.8, 6.9], [26.8, 8.1]]) # Planche droite
+    
+    pline([[1.2, 6.9], [1.2, 8.1]])
+    pline([[26.8, 6.9], [26.8, 8.1]])
     cx_b_l, cy_b_l = court_to_px(1.575, 7.5)
     cv2.circle(sidebar, (cx_b_l, cy_b_l), max(2, int(0.225 * sc)), C_LINE, lw, cv2.LINE_AA)
     cx_b_r, cy_b_r = court_to_px(26.425, 7.5)
@@ -386,60 +373,59 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     # ==========================================
     # AFFICHAGE DES JOUEURS
     # ==========================================
-    dot_r = max(10, int(sc * 0.50))
+    dot_r = max(6, int(sc * 0.45))
     for track_id, player in state.players.items():
         if player.court_pos_m is None:
             continue
         X_m, Y_m = player.court_pos_m
         
-        # Sécurité pour garder les points à l'intérieur de l'affichage
         X_m = max(0.0, min(COURT_L, X_m))
         Y_m = max(0.0, min(COURT_W, Y_m))
-        
         px, py = court_to_px(X_m, Y_m)
 
-        if player.team_id == 0:
-            color = C_TEAM_A   # Rouge
-        elif player.team_id == 1:
-            color = C_TEAM_B # Cyan
-        else:
-            color = C_NO_TEAM # Gris (Calibration)
+        if player.team_id == 0: color = C_TEAM_A
+        elif player.team_id == 1: color = C_TEAM_B
+        else: color = C_NO_TEAM
 
-        # Dessin du joueur
         cv2.circle(sidebar, (px, py), dot_r, color, -1, cv2.LINE_AA)
-        cv2.circle(sidebar, (px, py), dot_r, (255, 255, 255), 2, cv2.LINE_AA) # Bordure blanche
+        cv2.circle(sidebar, (px, py), dot_r, (255, 255, 255), 2, cv2.LINE_AA) 
 
-    # Séparateur gauche
-    cv2.line(sidebar, (0, 0), (0, sidebar_h), (60, 60, 70), 1)
+    # --- SÉPARATEUR GAUCHE ET PLACEHOLDER DASHBOARD ---
+    cv2.line(sidebar, (0, 0), (0, sidebar_h), (60, 60, 70), 2)
+    
+    # Ligne pour délimiter visuellement la zone du futur dashboard
+    dash_start_y = mg_y + court_px_h + 40
+    cv2.line(sidebar, (0, dash_start_y), (sidebar_w, dash_start_y), (60, 60, 70), 1)
+    cv2.putText(sidebar, "FUTUR DASHBOARD TACTIQUE ICI", (mg_x, dash_start_y + 40),
+                FONT_MONO, 0.6, C_OFF, 1, cv2.LINE_AA)
 
     return sidebar
 
-
 # ===========================================================================
-# ASSEMBLAGE FINAL
+# 4. ASSEMBLAGE FINAL
 # ===========================================================================
 
-def render_debug_frame(frame: np.ndarray, state: MatchState, sidebar_w: int = 550, margin_ratio: float = 1.50) -> np.ndarray:
+def render_debug_frame(frame: np.ndarray, state: MatchState, sidebar_w: int, margin_ratio: float = 1.50) -> np.ndarray:
     """
-    - Sidebar prend toute la hauteur.
-    - HUD prend la largeur de la vidéo uniquement.
+    Conforme à ton schéma : 
+    Gauche [ HUD + Vidéo ] | Droite [ Sidebar complète ]
     """
     h, w = frame.shape[:2]
     HUD_H = 55
 
     # 1. Préparation de la vidéo annotée
     main = draw_zones_and_masks(frame, state, margin_ratio, mask_palyer=False, mask_net=True)
-    # On utilise votre nouvelle version de draw_detections
-    main = draw_detections(main, state, txt_hoop=False, txt_player=True, show_team_crop=True)
+    main = draw_detections(main, state, txt_hoop=False, txt_player=False, show_team_crop=True)
 
-    # 2. Création du HUD (Largeur = w, celle de la vidéo)
+    # 2. Création du HUD
     hud = build_top_hud(w, state)
 
-    # 3. Assemblage de la colonne de gauche (HUD au dessus de la vidéo)
+    # 3. Assemblage Bloc Gauche (HUD + Vidéo)
     left_pane = np.vstack([hud, main])
 
-    # 4. Création de la Sidebar (Hauteur = h + HUD_H, pour correspondre au left_pane)
-    sidebar = build_sidebar(sidebar_h=h + HUD_H, sidebar_w=sidebar_w, state=state)
+    # 4. Création Bloc Droit (Sidebar). Sa hauteur doit matcher le left_pane.
+    sidebar_h = h + HUD_H
+    sidebar = build_sidebar(sidebar_h=sidebar_h, sidebar_w=sidebar_w, state=state)
 
     # 5. Assemblage final horizontal
     return np.hstack([left_pane, sidebar])

@@ -106,7 +106,7 @@ SHOT_CONFIDENCE_THRESHOLD = 0.4
 WHISTLE_DISPLAY_FRAMES = 15     # ~0.5 sec à 30fps
 
 # --- Taille des panneaux de rendu ---
-SIDEBAR_W = 600                 # Largeur de la minimap
+SIDEBAR_W = 900
 
 
 # ===========================================================================
@@ -246,10 +246,10 @@ def process_video(
     vid_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     vid_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 
-    # Dimensions de la frame de sortie (HUD en haut, minimap à droite)
+    # Dimensions de la frame de sortie (Schéma: Gauche=Vidéo, Droite=Sidebar)
     HUD_H = 55
     out_w = vid_w + SIDEBAR_W
-    out_h = vid_h + HUD_H
+    out_h = vid_h + HUD_H  # La hauteur max est dictée par le bloc de gauche
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
@@ -264,7 +264,7 @@ def process_video(
 
     # Initialisation du filtre 1 Euro pour la caméra
     # mincutoff=0.01 (lissage fort au repos) | beta=0.50 (réactivité rapide en mouvement)
-    state.camera.kp_filter = OneEuroFilterVectorized(mincutoff=0.001, beta=0.10)
+    state.camera.kp_filter = OneEuroFilterVectorized(mincutoff=0.0001, beta=0.01)
 
     # --- Variables de contrôle inter-frames ---
     prev_hoop_bbox      = None    # Dernière bbox panier connue (pour is_camera_stable)
@@ -674,7 +674,7 @@ def process_video(
 
 if __name__ == "__main__":
 
-    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_layup.mp4")
+    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
     OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
 
     parser = argparse.ArgumentParser(
