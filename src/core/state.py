@@ -27,6 +27,14 @@ class PlayerState:
     # File d'attente pour lisser la trajectoire (fenêtre glissante)
     pos_history_m: deque = field(default_factory=lambda: deque(maxlen=15))
     speed_kmh: float = 0.0
+    accel_ms2: float = 0.0
+
+    # Dans MatchState, ajoute :
+    # Structure : {team_id: {"avg_speed": 0.0, "std_speed": 0.0, "avg_accel": 0.0, ...}}
+    team_metrics: Dict[int, Dict[str, float]] = field(default_factory=lambda: {
+        0: {"avg_speed": 0.0, "std_speed": 0.0, "avg_accel": 0.0, "std_accel": 0.0},
+        1: {"avg_speed": 0.0, "std_speed": 0.0, "avg_accel": 0.0, "std_accel": 0.0}
+    })
 
 
 @dataclass
