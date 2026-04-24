@@ -113,7 +113,7 @@ def get_players_masks(
         return []
 
     # ==========================================
-    # MÉTHODE 1 : L'APPROXIMATION GÉOMÉTRIQUE (CAPSULE)
+    # MÉTHODE 1 : L'APPROXIMATION GÉOMÉTRIQUE (CAPSULE FLOUTÉE)
     # ==========================================
     if method == "ellipse" or method == "capsule": 
         if frame_shape is None:
@@ -133,7 +133,6 @@ def get_players_masks(
             box_h = y2 - y1
             
             # Réduction de la largeur (les humains sont plus fins que leur BBox)
-            # On prend 70% de la largeur totale pour éviter de grignoter le logo à côté
             capsule_w = int(box_w * 0.70) 
             radius = int(capsule_w / 2)
             
@@ -144,23 +143,28 @@ def get_players_masks(
             bottom_cy = int(y2 - radius)
             
             # Le haut de la capsule s'arrête un peu en dessous du haut de la BBox 
-            # (pour ignorer les bras levés)
             top_cy = int(y1 + (box_h * 0.15) + radius) 
             
             # Sécurité mathématique si la BBox est très écrasée
             if top_cy > bottom_cy:
                 top_cy = bottom_cy
 
-            # 4. Dessin de la Capsule (2 Cercles + 1 Rectangle central)
+            # 4. Dessin de la Capsule en BLANC PUR (255) sur le fond noir
             # Cercle du haut (Tête/Épaules)
-            cv2.circle(mask, (cx, top_cy), radius, 1, -1)
+            cv2.circle(mask, (cx, top_cy), radius, 255, -1)
             # Cercle du bas (Pieds)
-            cv2.circle(mask, (cx, bottom_cy), radius, 1, -1)
+            cv2.circle(mask, (cx, bottom_cy), radius, 255, -1)
             # Rectangle central (Torse/Jambes)
-            cv2.rectangle(mask, (cx - radius, top_cy), (cx + radius, bottom_cy), 1, -1)
+            cv2.rectangle(mask, (cx - radius, top_cy), (cx + radius, bottom_cy), 255, -1)
             
-            # 5. Conversion en booléen
-            masks.append(mask.astype(bool))
+            # 5. FEATHERING (Flou des contours)
+            blur_size = 21 # La taille du flou (doit être un nombre impair)
+            mask_blurred = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
+            
+            # 6. Conversion en flottant (0.0 à 1.0)
+            mask_float = mask_blurred.astype(np.float32) / 255.0
+            
+            masks.append(mask_float)
             
         return masks
 
