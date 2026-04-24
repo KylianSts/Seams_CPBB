@@ -131,16 +131,24 @@ def apply_virtual_logo(frame: np.ndarray, state: MatchState, config: LogoConfig)
     # Normalisation de l'Alpha entre 0.0 et 1.0, pondérée par l'opacité désirée
     warped_alpha = (warped_logo[..., 3].astype(np.float32) / 255.0) * config.opacity
 
-    # 4. Gestion de l'occlusion (Masques SAM)
-    # Si des joueurs marchent sur le logo, leur masque mettra l'Alpha du logo à 0
+    # 4. Gestion de l'occlusion (Masques continus / Feathering)
     if state.player_masks:
-        combined_mask = np.zeros((h_frame, w_frame), dtype=bool)
-        for mask in state.player_masks:
-            if mask.shape == combined_mask.shape:
-                combined_mask |= mask
+        # On crée une toile vide de type "float32" au lieu de "bool"
+        combined_occlusion = np.zeros((h_frame, w_frame), dtype=np.float32)
+        
+        for mask_float in state.player_masks:
+            # Sécurité pour vérifier que c'est bien un masque float32 (compatible SAM et Capsule)
+            if mask_float.dtype == bool:
+                mask_float = mask_float.astype(np.float32)
                 
-        # On rend le logo 100% transparent là où il y a un joueur
-        warped_alpha[combined_mask] = 0.0
+            if mask_float.shape == combined_occlusion.shape:
+                # On utilise np.maximum pour fusionner les opacités des joueurs 
+                # (empêche l'opacité de dépasser 1.0 s'ils se chevauchent)
+                combined_occlusion = np.maximum(combined_occlusion, mask_float)
+                
+        # Modification progressive de la transparence du logo
+        # Ex: Si le joueur est à 0.8 d'opacité (bord flou), le logo devient à 0.2 d'opacité
+        warped_alpha = warped_alpha * (1.0 - combined_occlusion)
 
     # 5. Fusion finale (Alpha Blending optimisé via NumPy)
     out_frame = frame.copy()

@@ -70,6 +70,7 @@ logger = logging.getLogger(__name__)
 # CONSTANTES
 # ===========================================================================
 
+MASK_METHOD = "capsule"
 COURT_L, COURT_W = 28.0, 15.0
 
 # --- Position des deux logos sur le terrain (symétrie) ---
@@ -458,45 +459,50 @@ def process_video(
                         players_in_ar += get_players_in_ar_zone(state.players, ar_bbox)
                 players_in_ar = list(set(players_in_ar))
 
-            sam_players_needed = enable_sam and (len(players_in_ar) > 0)
-            sam_net_needed     = enable_sam and ball_near and state.hoop_bbox_px is not None
+            # On active le masque joueur dès qu'un joueur est sur le logo (indépendant de SAM)
+            mask_players_needed = len(players_in_ar) > 0
+            sam_net_needed      = enable_sam and ball_near and state.hoop_bbox_px is not None
 
             state.active_triggers["sam_net_active"]     = sam_net_needed
-            state.active_triggers["sam_players_active"] = sam_players_needed
+            state.active_triggers["sam_players_active"] = mask_players_needed
 
             # ---------------------------------------------------------------
-            # ÉTAPE 6 — Segmentation SAM (encodage unique par frame)
-            # L'encodage est coûteux → on ne l'effectue QUE si au moins un
-            # des deux triggers SAM est actif.
+            # ÉTAPE 6 — Masquage & Segmentation (Joueurs et Filet)
             # ---------------------------------------------------------------
-            if sam_predictor is not None and (sam_players_needed or sam_net_needed):
-
-                # Encodage de l'image (1 seul appel par frame)
+            
+            # Faut-il encoder l'image pour SAM ? (Seulement si SAM est requis)
+            need_sam_encoding = sam_net_needed or (mask_players_needed and MASK_METHOD == "sam")
+            
+            if need_sam_encoding and sam_predictor is not None:
                 encode_frame(sam_predictor, frame, seg_config)
 
-                # Masques des joueurs qui gênent le logo
-                if sam_players_needed:
-                    boxes_ar = [
-                        state.players[tid].bbox_px
-                        for tid in players_in_ar
-                        if tid in state.players
-                    ]
-                    if boxes_ar:
-                        state.player_masks = get_players_masks(
-                            sam_predictor, boxes_ar, seg_config
-                        )
-
-                # Masque du filet
-                if sam_net_needed:
-                    state.net_mask = get_net_mask(
-                        sam_predictor,
-                        state.hoop_bbox_px,
-                        vid_w, vid_h,
-                        seg_config
+            # 1. Masques des joueurs qui gênent le logo (Capsule ou SAM)
+            if mask_players_needed:
+                boxes_ar = [
+                    state.players[tid].bbox_px
+                    for tid in players_in_ar
+                    if tid in state.players
+                ]
+                if boxes_ar:
+                    # Appel de la fonction avec les bons arguments nommés
+                    state.player_masks = get_players_masks(
+                        player_boxes=boxes_ar,
+                        config=seg_config,
+                        predictor=sam_predictor,
+                        method=MASK_METHOD,
+                        frame_shape=frame.shape
                     )
-                    # On alimente l'historique des aires du filet
-                    if state.net_mask is not None:
-                        state.net_area_history.append(float(np.sum(state.net_mask)))
+
+            # 2. Masque du filet (Toujours SAM)
+            if sam_net_needed and sam_predictor is not None:
+                state.net_mask = get_net_mask(
+                    sam_predictor,
+                    state.hoop_bbox_px,
+                    vid_w, vid_h,
+                    seg_config
+                )
+                if state.net_mask is not None:
+                    state.net_area_history.append(float(np.sum(state.net_mask)))
 
             # ---------------------------------------------------------------
             # ÉTAPE 7 — Incrustation du logo AR
@@ -667,7 +673,7 @@ def process_video(
 
 if __name__ == "__main__":
 
-    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
+    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_layup.mp4")
     OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
 
     parser = argparse.ArgumentParser(
