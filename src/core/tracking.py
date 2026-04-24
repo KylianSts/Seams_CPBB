@@ -10,7 +10,7 @@ disparitions temporaires (occlusion) via un buffer interne.
 import logging
 from pathlib import Path
 from typing import List, Tuple
-from collections import deque  # IMPORT AJOUTÉ POUR LA MÉMOIRE
+from collections import deque 
 
 import cv2
 import numpy as np
@@ -18,6 +18,7 @@ import torch
 
 from core.state import MatchState, PlayerState
 from core.filters import apply_ema_2d
+from core.track_supervisor import TrackSupervisor
 from boxmot.trackers.botsort.botsort import BotSort
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,8 @@ def update_players_tracking(
     player_detections: List[Tuple[float, float, float, float, float]],
     frame: np.ndarray,
     state: MatchState,
+    team_detector = None,       # NOUVEAU : Référence au modèle GMM
+    supervisor = None,          # NOUVEAU : Instance du TrackSupervisor
     max_lost_frames: int = 20   # ~200ms à 30fps
 ) -> MatchState:
     """
@@ -104,8 +107,16 @@ def update_players_tracking(
     else:
         dets_array = np.empty((0, 6), dtype=np.float32)
 
-    # 2. Mise à jour BotSort
+    # 2. Mise à jour BotSort brute
     tracked_objects = tracker.update(dets_array, frame)
+
+    # =======================================================================
+    # NOUVEAU : SUPERVISION (Le Veto GMM)
+    # On filtre les résultats de BotSort avant de les injecter dans le State
+    # =======================================================================
+    if supervisor is not None and team_detector is not None and tracked_objects is not None:
+        tracked_objects = supervisor.apply_team_veto(tracked_objects, frame, state, team_detector)
+    # =======================================================================
 
     new_players_dict = {}
     active_ids = set()

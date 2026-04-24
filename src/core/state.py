@@ -21,6 +21,7 @@ class PlayerState:
     court_pos_m: Optional[Tuple[float, float]] = None   # (X, Y) en mètres sur terrain FIBA
     team_id: Optional[int] = None
     has_ball: bool = False
+    is_lost: bool = False
 
     # --- Cinématique ---
     # File d'attente pour lisser la trajectoire (fenêtre glissante)

@@ -57,6 +57,7 @@ from core.render import render_debug_frame
 from core.metrics import compute_kinematics
 from core.detect_team import TeamDetector
 from core.filters import filter_top_10_players, filter_best_ball, OneEuroFilterVectorized
+from core.track_supervisor import TrackSupervisor
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -191,6 +192,9 @@ def process_video(
     # --- Tracker joueurs (BotSort) ---
     tracker = load_tracker(device=device)
 
+    # --- Superviseur de Tracking (Anti ID-Switch) ---
+    supervisor = TrackSupervisor(gmm_veto_threshold=0.75)
+
     # --- Modèle de segmentation (SAM 2.1) ---
     seg_config    = None
     sam_predictor = None
@@ -258,7 +262,7 @@ def process_video(
 
     # Initialisation du filtre 1 Euro pour la caméra
     # mincutoff=0.01 (lissage fort au repos) | beta=0.50 (réactivité rapide en mouvement)
-    state.camera.kp_filter = OneEuroFilterVectorized(mincutoff=0.01, beta=0.50)
+    state.camera.kp_filter = OneEuroFilterVectorized(mincutoff=0.001, beta=0.10)
 
     # --- Variables de contrôle inter-frames ---
     prev_hoop_bbox      = None    # Dernière bbox panier connue (pour is_camera_stable)
@@ -334,7 +338,9 @@ def process_video(
                 tracker,
                 filtered_players,
                 frame,
-                state
+                state,
+                team_detector=team_detector,
+                supervisor=supervisor
             )
 
             # ---------------------------------------------------------------
@@ -356,7 +362,7 @@ def process_video(
 
             if cam_stable_strict:
                 state.camera.stable_frames_count += 1
-                # --- NOUVEAU : On nourrit le filtre avec les points FIXES pour garder l'état "chaud"
+                # On nourrit le filtre avec les points FIXES pour garder l'état "chaud"
                 if state.court_keypoints_px is not None:
                     state.court_keypoints_px = state.camera.kp_filter(current_t, state.court_keypoints_px)
                 # H reste le même (recyclé)
@@ -365,7 +371,6 @@ def process_video(
                 court_result = run_court_detection(court_model, frame, court_config)
                 
                 if court_result.keypoints_px is not None:
-                    # --- NOUVEAU : On nourrit le filtre avec les points BRUITS
                     # La transition sera fluide car x_prev était calé sur la position stable
                     state.court_keypoints_px = state.camera.kp_filter(current_t, court_result.keypoints_px)
                     state.court_keypoints_conf = court_result.keypoints_conf
