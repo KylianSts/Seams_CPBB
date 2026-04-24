@@ -430,7 +430,7 @@ def render_debug_frame(frame: np.ndarray, state: MatchState, sidebar_w: int = 55
     # 1. Préparation de la vidéo annotée
     main = draw_zones_and_masks(frame, state, margin_ratio, mask_palyer=False, mask_net=True)
     # On utilise votre nouvelle version de draw_detections
-    main = draw_detections(main, state, txt_hoop=False, txt_player=False, show_team_crop=True)
+    main = draw_detections(main, state, txt_hoop=False, txt_player=True, show_team_crop=True)
 
     # 2. Création du HUD (Largeur = w, celle de la vidéo)
     hud = build_top_hud(w, state)
