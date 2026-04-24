@@ -7,9 +7,7 @@ Calcule les vitesses, accélérations et statistiques globales des joueurs.
 
 import numpy as np
 from core.state import MatchState
-
-import numpy as np
-from core.state import MatchState
+from scipy.spatial import ConvexHull
 
 def compute_kinematics(state: MatchState, fps: float) -> None:
     """
@@ -65,3 +63,65 @@ def compute_kinematics(state: MatchState, fps: float) -> None:
     if all_speeds:
         state.avg_speed_kmh = float(np.mean(all_speeds))
         state.std_speed_kmh = float(np.std(all_speeds))
+
+def is_in_paint(pos_m: tuple) -> bool:
+    """Vérifie si une position en mètres est dans l'une des deux raquettes FIBA."""
+    x, y = pos_m
+    # Raquette Gauche : 0 à 5.8m en X | 5.05 à 9.95m en Y (Largeur 4.9m centrée sur 7.5m)
+    in_left = (0.0 <= x <= 5.8) and (5.05 <= y <= 9.95)
+    # Raquette Droite : 22.2 à 28m en X
+    in_right = (22.2 <= x <= 28.0) and (5.05 <= y <= 9.95)
+    return in_left or in_right
+
+def calculate_spacing(points: list) -> float:
+    """Calcule l'aire du polygone convexe formé par les joueurs (m²)."""
+    if len(points) < 3:
+        return 0.0
+    try:
+        hull = ConvexHull(points)
+        return float(hull.volume) # Dans ConvexHull 2D, 'volume' est l'aire
+    except Exception:
+        return 0.0
+
+def compute_kinematics(state: MatchState, fps: float) -> None:
+    dt_frame = 1.0 / fps
+    team_data = {
+        0: {"speeds": [], "accels": [], "positions": [], "in_paint": 0},
+        1: {"speeds": [], "accels": [], "positions": [], "in_paint": 0}
+    }
+
+    # 1. Analyse par joueur
+    for player in state.players.values():
+        if player.court_pos_m is None: continue
+        
+        # Cinématique (Vitesse / Accel)
+        player.pos_history_m.append(player.court_pos_m)
+        if len(player.pos_history_m) >= 5:
+            p_old, p_new = player.pos_history_m[-5], player.pos_history_m[-1]
+            dist_m = np.sqrt((p_new[0] - p_old[0])**2 + (p_new[1] - p_old[1])**2)
+            new_speed_ms = dist_m / (4 * dt_frame)
+            player.accel_ms2 = (new_speed_ms - (player.speed_kmh / 3.6)) / dt_frame
+            player.speed_kmh = new_speed_ms * 3.6
+
+        # Données d'équipe
+        if player.team_id in [0, 1]:
+            team_data[player.team_id]["positions"].append(player.court_pos_m)
+            if player.speed_kmh > 1.5: # On ne compte que les joueurs actifs pour la vitesse
+                team_data[player.team_id]["speeds"].append(player.speed_kmh)
+                team_data[player.team_id]["accels"].append(player.accel_ms2)
+            
+            # Encombrement Raquette
+            if is_in_paint(player.court_pos_m):
+                team_data[player.team_id]["in_paint"] += 1
+
+    # 2. Calcul final des statistiques d'équipe
+    for tid in [0, 1]:
+        d = team_data[tid]
+        state.team_metrics[tid]["spacing"] = calculate_spacing(d["positions"])
+        state.team_metrics[tid]["paint_count"] = float(d["in_paint"])
+        
+        if d["speeds"]:
+            state.team_metrics[tid]["avg_speed"] = float(np.mean(d["speeds"]))
+            state.team_metrics[tid]["std_speed"] = float(np.std(d["speeds"]))
+        if d["accels"]:
+            state.team_metrics[tid]["avg_accel"] = float(np.mean(d["accels"]))

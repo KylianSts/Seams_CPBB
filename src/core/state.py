@@ -103,8 +103,17 @@ class MatchState:
     avg_speed_kmh: float = 0.0
     std_speed_kmh: float = 0.0
 
-    # Structure : {team_id: {"avg_speed": 0.0, "std_speed": 0.0, "avg_accel": 0.0, ...}}
     team_metrics: Dict[int, Dict[str, float]] = field(default_factory=lambda: {
-        0: {"avg_speed": 0.0, "std_speed": 0.0, "avg_accel": 0.0, "std_accel": 0.0},
-        1: {"avg_speed": 0.0, "std_speed": 0.0, "avg_accel": 0.0, "std_accel": 0.0}
+        0: {
+            "avg_speed": 0.0, "std_speed": 0.0, 
+            "avg_accel": 0.0, "std_accel": 0.0,
+            "spacing": 0.0,      # Aire en m²
+            "paint_count": 0.0   # Nb joueurs dans la raquette
+        },
+        1: {
+            "avg_speed": 0.0, "std_speed": 0.0, 
+            "avg_accel": 0.0, "std_accel": 0.0,
+            "spacing": 0.0,
+            "paint_count": 0.0
+        }
     })
