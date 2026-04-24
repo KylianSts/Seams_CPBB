@@ -345,46 +345,41 @@ def process_video(
             # ---------------------------------------------------------------
             # ÉTAPE 3 — Stabilité caméra + YOLO-Pose + Homographie
             # ---------------------------------------------------------------
-            # Double calcul en local
+
+            # Calcul de la stabilité (basé sur le panier)
             cam_stable_strict = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_px=5.0)
             cam_stable_ar = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_px=50.0)
             
-            # On nourrit le state avec le seuil strict (pour render.py et la calibration)
             state.camera.is_stable = cam_stable_strict
 
+            current_t = state.frame_idx / fps
+
             if cam_stable_strict:
-                # Caméra immobile → on recycle H et les keypoints
                 state.camera.stable_frames_count += 1
-
+                # --- NOUVEAU : On nourrit le filtre avec les points FIXES pour garder l'état "chaud"
+                if state.court_keypoints_px is not None:
+                    state.court_keypoints_px = state.camera.kp_filter(current_t, state.court_keypoints_px)
+                # H reste le même (recyclé)
             else:
-                # Caméra a bougé → relance YOLO-Pose
                 state.camera.stable_frames_count = 0
-
                 court_result = run_court_detection(court_model, frame, court_config)
-
-                # --- FILTRAGE 1 EURO ---
+                
                 if court_result.keypoints_px is not None:
-                    current_t = state.frame_idx / fps
-                    # On écrase les points bruts par les points lissés
-                    court_result.keypoints_px = state.camera.kp_filter(current_t, court_result.keypoints_px)
-                # ----------------------------------
-
-                H_new = compute_homography(court_result, court_config)
-
-                if H_new is not None:
-                    # On remplace H directement 
-                    state.camera.H_matrix      = H_new
-                    state.court_keypoints_px   = court_result.keypoints_px
+                    # --- NOUVEAU : On nourrit le filtre avec les points BRUITS
+                    # La transition sera fluide car x_prev était calé sur la position stable
+                    state.court_keypoints_px = state.camera.kp_filter(current_t, court_result.keypoints_px)
                     state.court_keypoints_conf = court_result.keypoints_conf
+                    
+                    # On recalcule H seulement avec les points lissés
+                    court_result.keypoints_px = state.court_keypoints_px
+                    H_new = compute_homography(court_result, court_config)
+                    if H_new is not None:
+                        state.camera.H_matrix = H_new
+                        _reprojet_all_players(state)
 
-                    # Mise à jour des positions terrain de TOUS les joueurs
-                    # avec la nouvelle matrice
-                    _reprojet_all_players(state)
-
-                # On mémorise la bbox du panier comme nouvelle ancre
-                if state.hoop_bbox_px is not None:
-                    prev_hoop_bbox = state.hoop_bbox_px
-
+            # Mémorisation pour la frame suivante
+            if state.hoop_bbox_px is not None:
+                prev_hoop_bbox = state.hoop_bbox_px
             # ---------------------------------------------------------------
             # ÉTAPE 3.5 — Calcul de la cinématique (Vitesse des joueurs)
             # ---------------------------------------------------------------
