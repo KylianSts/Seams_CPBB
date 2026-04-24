@@ -89,31 +89,84 @@ def encode_frame(predictor: SAM2ImagePredictor, frame_bgr: np.ndarray, config: S
 # REQUÊTES DE MASQUES (Rapide)
 # ===========================================================================
 
+import cv2
+import numpy as np
+import torch
+from typing import List, Tuple, Optional
+# (Assure-toi d'importer SAM2ImagePredictor si ce n'est pas déjà fait)
+
 def get_players_masks(
-    predictor: SAM2ImagePredictor, 
     player_boxes: List[Tuple[float, float, float, float]], 
-    config: SegmentationConfig
+    config: SegmentationConfig,
+    predictor: Optional['SAM2ImagePredictor'] = None, 
+    method: str = "sam",
+    frame_shape: Optional[Tuple[int, int]] = None
 ) -> List[np.ndarray]:
     """
-    Prend une liste de boîtes de joueurs et retourne une liste de masques booléens.
-    L'image doit avoir été encodée via `encode_frame` juste avant.
+    Retourne une liste de masques booléens pour chaque joueur.
+    
+    Args:
+        method: "sam" (précis mais lent) ou "ellipse" (approximation ultra-rapide).
+        frame_shape: (Hauteur, Largeur) requis uniquement pour la méthode "ellipse".
     """
     if not player_boxes:
         return []
 
-    # SAM attend un numpy array de format (N, 4)
-    boxes_array = np.array(player_boxes, dtype=np.float32)
+    # ==========================================
+    # MÉTHODE 1 : L'APPROXIMATION GÉOMÉTRIQUE
+    # ==========================================
+    if method == "ellipse":
+        if frame_shape is None:
+            raise ValueError("L'argument 'frame_shape' (H, W) est requis pour la méthode ellipse.")
+            
+        h_img, w_img = frame_shape[:2]
+        masks = []
+        
+        for box in player_boxes:
+            x1, y1, x2, y2 = box
+            
+            # 1. Création d'une toile noire (0)
+            mask = np.zeros((h_img, w_img), dtype=np.uint8)
+            
+            # 2. Calcul des paramètres de l'ellipse
+            center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
+            
+            # ASTUCE PRO : Un humain est plus fin qu'une BBox globale (qui inclut les bras/jambes écartées).
+            # On réduit légèrement la largeur de l'ellipse (ex: 80% de la largeur de la bbox)
+            # pour éviter d'effacer trop de logo sur les côtés.
+            width_radius = int(((x2 - x1) / 2) * 0.80) 
+            height_radius = int((y2 - y1) / 2)
+            axes = (width_radius, height_radius)
+            
+            # 3. Dessin de l'ellipse remplie en blanc (1)
+            cv2.ellipse(mask, center, axes, angle=0, startAngle=0, endAngle=360, color=1, thickness=-1)
+            
+            # 4. Conversion en booléen pour correspondre au format de sortie de SAM
+            masks.append(mask.astype(bool))
+            
+        return masks
 
-    with torch.autocast(device_type="cuda" if "cuda" in config.torch_device_str else "cpu", dtype=torch.bfloat16):
-        masks, scores, _ = predictor.predict(
-            point_coords=None, 
-            point_labels=None,
-            box=boxes_array,
-            multimask_output=False # On ne veut que le meilleur masque par joueur
-        )
-    
-    # SAM retourne un format [N, 1, H, W]. On le réduit à [N, H, W] en booléen.
-    return [mask.squeeze().astype(bool) for mask in masks]
+    # ==========================================
+    # MÉTHODE 2 : LA SEGMENTATION PROFONDE (SAM)
+    # ==========================================
+    elif method == "sam":
+        if predictor is None:
+            raise ValueError("L'objet 'predictor' SAM doit être fourni pour la méthode 'sam'.")
+            
+        boxes_array = np.array(player_boxes, dtype=np.float32)
+
+        with torch.autocast(device_type="cuda" if "cuda" in config.torch_device_str else "cpu", dtype=torch.bfloat16):
+            masks, scores, _ = predictor.predict(
+                point_coords=None, 
+                point_labels=None,
+                box=boxes_array,
+                multimask_output=False
+            )
+        
+        return [mask.squeeze().astype(bool) for mask in masks]
+        
+    else:
+        raise ValueError(f"Méthode de masque inconnue : {method}")
 
 
 def get_net_mask(
