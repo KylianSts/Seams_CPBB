@@ -1,7 +1,7 @@
 """
 render.py
 ---------
-Moteur de rendu graphique (Debug V0).
+Moteur de rendu graphique (Debug V1).
 Prend le MatchState et dessine toutes les informations visuelles.
 """
 
@@ -393,11 +393,38 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     # --- SÉPARATEUR GAUCHE ET PLACEHOLDER DASHBOARD ---
     cv2.line(sidebar, (0, 0), (0, sidebar_h), (60, 60, 70), 2)
     
-    # Ligne pour délimiter visuellement la zone du futur dashboard
+    # Ligne pour délimiter visuellement la zone du dashboard
     dash_start_y = mg_y + court_px_h + 40
     cv2.line(sidebar, (0, dash_start_y), (sidebar_w, dash_start_y), (60, 60, 70), 1)
-    cv2.putText(sidebar, "FUTUR DASHBOARD TACTIQUE ICI", (mg_x, dash_start_y + 40),
-                FONT_MONO, 0.6, C_OFF, 1, cv2.LINE_AA)
+
+    # --- ZONE DASHBOARD TACTIQUE (Sous la minimap) ---
+    dash_y = mg_y + court_px_h + 50
+    
+    # Titres des colonnes
+    cv2.putText(sidebar, "METRIQUE", (mg_x, dash_y), FONT_MONO, 0.4, C_OFF, 1)
+    cv2.putText(sidebar, "EQUIPE A", (mg_x + 180, dash_y), FONT_MONO, 0.4, C_TEAM_A, 1)
+    cv2.putText(sidebar, "EQUIPE B", (mg_x + 320, dash_y), FONT_MONO, 0.4, C_TEAM_B, 1)
+    cv2.putText(sidebar, "DIFF",     (mg_x + 460, dash_y), FONT_MONO, 0.4, C_WARN, 1)
+    
+    cv2.line(sidebar, (mg_x, dash_y + 10), (sidebar_w - mg_x, dash_y + 10), (60, 60, 70), 1)
+
+    def draw_row(label, val_a, val_b, y_pos, unit=""):
+        diff = val_a - val_b
+        cv2.putText(sidebar, label, (mg_x, y_pos), FONT_MONO, 0.45, (200, 200, 200), 1)
+        cv2.putText(sidebar, f"{val_a:.1f}{unit}", (mg_x + 180, y_pos), FONT_MONO, 0.45, (255,255,255), 1)
+        cv2.putText(sidebar, f"{val_b:.1f}{unit}", (mg_x + 320, y_pos), FONT_MONO, 0.45, (255,255,255), 1)
+        # Affichage de la différence avec signe
+        diff_txt = f"{'+' if diff > 0 else ''}{diff:.1f}"
+        cv2.putText(sidebar, diff_txt, (mg_x + 460, y_pos), FONT_MONO, 0.45, C_WARN, 1)
+
+    # Lignes de données
+    metrics_a = state.team_metrics[0]
+    metrics_b = state.team_metrics[1]
+    
+    draw_row("VITESSE MOY.", metrics_a["avg_speed"], metrics_b["avg_speed"], dash_y + 40, " km/h")
+    draw_row("ECART-TYPE V.", metrics_a["std_speed"], metrics_b["std_speed"], dash_y + 75, " km/h")
+    draw_row("ACCEL. MOY.",  metrics_a["avg_accel"], metrics_b["avg_accel"], dash_y + 110, " m/s2")
+    draw_row("ECART-TYPE A.", metrics_a["std_accel"], metrics_b["std_accel"], dash_y + 145, " m/s2")
 
     return sidebar
 
