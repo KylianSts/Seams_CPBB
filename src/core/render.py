@@ -392,39 +392,92 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
 
     # --- SÉPARATEUR GAUCHE ET PLACEHOLDER DASHBOARD ---
     cv2.line(sidebar, (0, 0), (0, sidebar_h), (60, 60, 70), 2)
-    
+
+    # ==========================================
+    # ZONE DASHBOARD TACTIQUE
+    # ==========================================
     # Ligne pour délimiter visuellement la zone du dashboard
-    dash_start_y = mg_y + court_px_h + 40
-    cv2.line(sidebar, (0, dash_start_y), (sidebar_w, dash_start_y), (60, 60, 70), 1)
-
-    # --- ZONE DASHBOARD TACTIQUE (Sous la minimap) ---
-    dash_y = mg_y + court_px_h + 50
+    dash_start_y = mg_y + court_px_h + 30
+    cv2.line(sidebar, (0, dash_start_y), (sidebar_w, dash_start_y), (60, 60, 70), 2)
     
-    # Titres des colonnes
-    cv2.putText(sidebar, "METRIQUE", (mg_x, dash_y), FONT_MONO, 0.4, C_OFF, 1)
-    cv2.putText(sidebar, "EQUIPE A", (mg_x + 180, dash_y), FONT_MONO, 0.4, C_TEAM_A, 1)
-    cv2.putText(sidebar, "EQUIPE B", (mg_x + 320, dash_y), FONT_MONO, 0.4, C_TEAM_B, 1)
-    cv2.putText(sidebar, "DIFF",     (mg_x + 460, dash_y), FONT_MONO, 0.4, C_WARN, 1)
+    # Coordonnées des colonnes (Élargies pour respirer)
+    COL_LBL = mg_x
+    COL_A   = mg_x + 220
+    COL_B   = mg_x + 380
+    COL_DIF = mg_x + 540
     
-    cv2.line(sidebar, (mg_x, dash_y + 10), (sidebar_w - mg_x, dash_y + 10), (60, 60, 70), 1)
+    y_curr = dash_start_y + 35
+    
+    # En-têtes de colonnes
+    cv2.putText(sidebar, "METRIQUE", (COL_LBL, y_curr), FONT_MONO, 0.45, C_OFF, 1, cv2.LINE_AA)
+    cv2.putText(sidebar, "EQUIPE A", (COL_A, y_curr), FONT_MONO, 0.45, C_TEAM_A, 1, cv2.LINE_AA)
+    cv2.putText(sidebar, "EQUIPE B", (COL_B, y_curr), FONT_MONO, 0.45, C_TEAM_B, 1, cv2.LINE_AA)
+    cv2.putText(sidebar, "DIFF.",    (COL_DIF, y_curr), FONT_MONO, 0.45, C_WARN, 1, cv2.LINE_AA)
+    
+    cv2.line(sidebar, (mg_x, y_curr + 10), (sidebar_w - mg_x, y_curr + 10), (60, 60, 70), 1)
+    
+    y_curr += 35
 
-    def draw_row(label, val_a, val_b, y_pos, unit=""):
+    def draw_section(title: str, y: int) -> int:
+        """Dessine un séparateur de section avec un fond gris."""
+        cv2.rectangle(sidebar, (mg_x, y - 18), (sidebar_w - mg_x, y + 6), (25, 30, 35), -1)
+        cv2.putText(sidebar, title, (mg_x + 10, y - 2), FONT_MONO, 0.45, (150, 150, 160), 1, cv2.LINE_AA)
+        return y + 30
+
+    def draw_row(label: str, val_a: float, val_b: float, y_pos: int, unit: str = "", is_int: bool = False) -> int:
+        """Dessine une ligne de métrique et incrémente la position Y automatiquement."""
+        # Formatage intelligent (sans décimale pour les compteurs de joueurs)
+        fmt = "{:.0f}" if is_int else "{:.1f}"
+        str_a = f"{fmt.format(val_a)}{unit}"
+        str_b = f"{fmt.format(val_b)}{unit}"
+        
         diff = val_a - val_b
-        cv2.putText(sidebar, label, (mg_x, y_pos), FONT_MONO, 0.45, (200, 200, 200), 1)
-        cv2.putText(sidebar, f"{val_a:.1f}{unit}", (mg_x + 180, y_pos), FONT_MONO, 0.45, (255,255,255), 1)
-        cv2.putText(sidebar, f"{val_b:.1f}{unit}", (mg_x + 320, y_pos), FONT_MONO, 0.45, (255,255,255), 1)
-        # Affichage de la différence avec signe
-        diff_txt = f"{'+' if diff > 0 else ''}{diff:.1f}"
-        cv2.putText(sidebar, diff_txt, (mg_x + 460, y_pos), FONT_MONO, 0.45, C_WARN, 1)
+        diff_txt = f"{'+' if diff > 0 else ''}{fmt.format(diff)}"
+        
+        cv2.putText(sidebar, label, (COL_LBL + 10, y_pos), FONT_MONO, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+        cv2.putText(sidebar, str_a, (COL_A, y_pos), FONT_MONO, 0.45, (255,255,255), 1, cv2.LINE_AA)
+        cv2.putText(sidebar, str_b, (COL_B, y_pos), FONT_MONO, 0.45, (255,255,255), 1, cv2.LINE_AA)
+        
+        # Le zéro parfait n'existe pas en float, on met en gris si c'est presque zéro
+        diff_color = C_OFF if abs(diff) < 0.05 else C_WARN
+        cv2.putText(sidebar, diff_txt, (COL_DIF, y_pos), FONT_MONO, 0.45, diff_color, 1, cv2.LINE_AA)
 
-    # Lignes de données
+        return y_pos + 30 # Espace pour la prochaine ligne
+
     metrics_a = state.team_metrics[0]
     metrics_b = state.team_metrics[1]
     
-    draw_row("VITESSE MOY.", metrics_a["avg_speed"], metrics_b["avg_speed"], dash_y + 40, " km/h")
-    draw_row("ECART-TYPE V.", metrics_a["std_speed"], metrics_b["std_speed"], dash_y + 75, " km/h")
-    draw_row("ACCEL. MOY.",  metrics_a["avg_accel"], metrics_b["avg_accel"], dash_y + 110, " m/s2")
-    draw_row("ECART-TYPE A.", metrics_a["std_accel"], metrics_b["std_accel"], dash_y + 145, " m/s2")
+    # --- SECTION 1 : CINÉMATIQUE ---
+    y_curr = draw_section("CINEMATIQUE (Moyennes lissées)", y_curr)
+    y_curr = draw_row("Vitesse Moy.", metrics_a["avg_speed"], metrics_b["avg_speed"], y_curr, " km/h")
+    y_curr = draw_row("Ecart-Type V.", metrics_a["std_speed"], metrics_b["std_speed"], y_curr, " km/h")
+    y_curr = draw_row("Accel. Moy.",  metrics_a["avg_accel"], metrics_b["avg_accel"], y_curr, " m/s2")
+    y_curr = draw_row("Ecart-Type A.", metrics_a["std_accel"], metrics_b["std_accel"], y_curr, " m/s2")
+    
+    y_curr += 10 # Espace supplémentaire
+    
+    # --- SECTION 2 : TACTIQUE ---
+    y_curr = draw_section("PLACEMENT & SPATIALISATION", y_curr)
+    y_curr = draw_row("Spacing (Aire)", metrics_a["spacing"], metrics_b["spacing"], y_curr, " m2")
+    y_curr = draw_row("Joueurs en Raquette", metrics_a["paint_count"], metrics_b["paint_count"], y_curr, "", is_int=True)
+
+    y_curr += 15
+
+    # --- 3. BLOC D'ALERTE ENCOMBREMENT ---
+    total_paint = metrics_a["paint_count"] + metrics_b["paint_count"]
+    
+    # La boîte devient rouge vif si la raquette est surpeuplée
+    alert_color = (60, 60, 200) if total_paint > 4 else (35, 40, 45)
+    text_color = (255, 255, 255) if total_paint > 4 else (150, 150, 150)
+    
+    cv2.rectangle(sidebar, (mg_x, y_curr), (sidebar_w - mg_x, y_curr + 35), alert_color, -1)
+    cv2.rectangle(sidebar, (mg_x, y_curr), (sidebar_w - mg_x, y_curr + 35), (60, 60, 70), 1) # Bordure
+
+    alert_txt = f"ENCOMBREMENT TOTAL RAQUETTES : {int(total_paint)} JOUEURS"
+    if total_paint > 4:
+        alert_txt += "  [ ALERTE REBOND / POST-UP ]"
+        
+    cv2.putText(sidebar, alert_txt, (mg_x + 15, y_curr + 23), FONT_MONO, 0.45, text_color, 1, cv2.LINE_AA)
 
     return sidebar
 
