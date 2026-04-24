@@ -113,11 +113,11 @@ def get_players_masks(
         return []
 
     # ==========================================
-    # MÉTHODE 1 : L'APPROXIMATION GÉOMÉTRIQUE
+    # MÉTHODE 1 : L'APPROXIMATION GÉOMÉTRIQUE (CAPSULE)
     # ==========================================
-    if method == "ellipse":
+    if method == "ellipse" or method == "capsule": 
         if frame_shape is None:
-            raise ValueError("L'argument 'frame_shape' (H, W) est requis pour la méthode ellipse.")
+            raise ValueError("L'argument 'frame_shape' (H, W) est requis pour la méthode géométrique.")
             
         h_img, w_img = frame_shape[:2]
         masks = []
@@ -128,20 +128,38 @@ def get_players_masks(
             # 1. Création d'une toile noire (0)
             mask = np.zeros((h_img, w_img), dtype=np.uint8)
             
-            # 2. Calcul des paramètres de l'ellipse
-            center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
+            # 2. Dimensions dynamiques
+            box_w = x2 - x1
+            box_h = y2 - y1
             
-            # ASTUCE PRO : Un humain est plus fin qu'une BBox globale (qui inclut les bras/jambes écartées).
-            # On réduit légèrement la largeur de l'ellipse (ex: 80% de la largeur de la bbox)
-            # pour éviter d'effacer trop de logo sur les côtés.
-            width_radius = int(((x2 - x1) / 2) * 0.80) 
-            height_radius = int((y2 - y1) / 2)
-            axes = (width_radius, height_radius)
+            # Réduction de la largeur (les humains sont plus fins que leur BBox)
+            # On prend 70% de la largeur totale pour éviter de grignoter le logo à côté
+            capsule_w = int(box_w * 0.70) 
+            radius = int(capsule_w / 2)
             
-            # 3. Dessin de l'ellipse remplie en blanc (1)
-            cv2.ellipse(mask, center, axes, angle=0, startAngle=0, endAngle=360, color=1, thickness=-1)
+            # 3. Calcul des points d'ancrage (Centré horizontalement, ancré en bas)
+            cx = int(x1 + (box_w / 2))
             
-            # 4. Conversion en booléen pour correspondre au format de sortie de SAM
+            # Le bas de la capsule est collé aux pieds (y2)
+            bottom_cy = int(y2 - radius)
+            
+            # Le haut de la capsule s'arrête un peu en dessous du haut de la BBox 
+            # (pour ignorer les bras levés)
+            top_cy = int(y1 + (box_h * 0.15) + radius) 
+            
+            # Sécurité mathématique si la BBox est très écrasée
+            if top_cy > bottom_cy:
+                top_cy = bottom_cy
+
+            # 4. Dessin de la Capsule (2 Cercles + 1 Rectangle central)
+            # Cercle du haut (Tête/Épaules)
+            cv2.circle(mask, (cx, top_cy), radius, 1, -1)
+            # Cercle du bas (Pieds)
+            cv2.circle(mask, (cx, bottom_cy), radius, 1, -1)
+            # Rectangle central (Torse/Jambes)
+            cv2.rectangle(mask, (cx - radius, top_cy), (cx + radius, bottom_cy), 1, -1)
+            
+            # 5. Conversion en booléen
             masks.append(mask.astype(bool))
             
         return masks
