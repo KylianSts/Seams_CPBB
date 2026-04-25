@@ -103,3 +103,27 @@ def is_camera_stable(
 
     # 3. La caméra est stable si le mouvement est inférieur au seuil
     return movement < threshold_px
+
+
+def is_ball_falling(ball_history: list, window: int = 5, min_dy_px: float = 2.0) -> bool:
+    """
+    Analyse l'historique récent de la balle pour déterminer si elle est en phase 
+    descendante (chute vers le panier). L'axe Y augmente vers le bas de l'image.
+    
+    Args:
+        ball_history: Liste de tuples (frame_idx, cx, cy)
+        window: Nombre de frames à regarder en arrière pour lisser le bruit
+        min_dy_px: Seuil de descente minimum en pixels pour valider la chute
+    """
+    # S'il n'y a pas assez d'historique, on accepte par défaut pour ne pas bloquer
+    if len(ball_history) < window:
+        return True
+        
+    # On extrait les coordonnées Y des X dernières frames
+    recent_y = [pos[2] for pos in ball_history[-window:]]
+    
+    # Tendance : Y_actuel - Y_ancien
+    # Si dy > 0, la balle est plus basse sur l'écran qu'il y a 5 frames -> Elle tombe.
+    dy = recent_y[-1] - recent_y[0]
+    
+    return dy > min_dy_px
