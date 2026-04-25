@@ -423,26 +423,30 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
         cv2.rectangle(sidebar, (mg_x, y - 18), (sidebar_w - mg_x, y + 6), (25, 30, 35), -1)
         cv2.putText(sidebar, title, (mg_x + 10, y - 2), FONT_MONO, 0.45, (150, 150, 160), 1, cv2.LINE_AA)
         return y + 30
-
+    
     def draw_row(label: str, val_a: float, val_b: float, y_pos: int, unit: str = "", is_int: bool = False) -> int:
         """Dessine une ligne de métrique et incrémente la position Y automatiquement."""
-        # Formatage intelligent (sans décimale pour les compteurs de joueurs)
-        fmt = "{:.0f}" if is_int else "{:.1f}"
+        # --- MODIFICATION ICI : On force l'arrondi à l'entier pour TOUT le monde ---
+        # Si tu veux garder une décimale pour la vitesse (ex: 24.1), mets {:.1f}
+        # Mais pour de la TV "propre", l'arrondi entier {:.0f} est souvent mieux.
+        fmt = "{:.0f}" 
         str_a = f"{fmt.format(val_a)}{unit}"
         str_b = f"{fmt.format(val_b)}{unit}"
         
         diff = val_a - val_b
-        diff_txt = f"{'+' if diff > 0 else ''}{fmt.format(diff)}"
+        # On arrondit aussi la différence pour éviter les "+0" ou "-0"
+        diff_rounded = round(diff) 
+        diff_txt = f"{'+' if diff_rounded > 0 else ''}{diff_rounded}"
         
         cv2.putText(sidebar, label, (COL_LBL + 10, y_pos), FONT_MONO, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
         cv2.putText(sidebar, str_a, (COL_A, y_pos), FONT_MONO, 0.45, (255,255,255), 1, cv2.LINE_AA)
         cv2.putText(sidebar, str_b, (COL_B, y_pos), FONT_MONO, 0.45, (255,255,255), 1, cv2.LINE_AA)
         
-        # Le zéro parfait n'existe pas en float, on met en gris si c'est presque zéro
-        diff_color = C_OFF if abs(diff) < 0.05 else C_WARN
+        # Le zéro parfait n'existe pas, on vérifie l'arrondi
+        diff_color = C_OFF if abs(diff_rounded) == 0 else C_WARN
         cv2.putText(sidebar, diff_txt, (COL_DIF, y_pos), FONT_MONO, 0.45, diff_color, 1, cv2.LINE_AA)
 
-        return y_pos + 30 # Espace pour la prochaine ligne
+        return y_pos + 45
 
     metrics_a = state.team_metrics[0]
     metrics_b = state.team_metrics[1]
