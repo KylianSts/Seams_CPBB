@@ -265,7 +265,7 @@ def process_video(
 
     # Initialisation du filtre 1 Euro pour la caméra
     # mincutoff=0.01 (lissage fort au repos) | beta=0.50 (réactivité rapide en mouvement)
-    state.camera.kp_filter = OneEuroFilterVectorized(mincutoff=0.001, beta=0.0)
+    state.camera.kp_filter = OneEuroFilterVectorized(mincutoff=0.01, beta=0.0)
 
     # --- Variables de contrôle inter-frames ---
     prev_hoop_bbox      = None    # Dernière bbox panier connue (pour is_camera_stable)
@@ -326,33 +326,15 @@ def process_video(
             filtered_players = filter_top_10_players(det_result.players)
             
             # Balle la plus logique
-            best_ball = filter_best_ball(det_result.ball, state) # Attention: detect_objects.py renvoyait det_result.ball comme un Tuple ou une liste selon ta V0, passe bien la liste brute ici ! S'il ne renvoie qu'une seule balle, modifie detect_objects.py pour renvoyer 'raw_balls' au lieu du [0].
+            best_ball = filter_best_ball(det_result.ball, state)
             
-            # On met à jour le state (pour la balle) et on utilisera filtered_players pour le tracking
+            # On met à jour le state (pour la balle et le panier)
             state.ball_bbox_px = best_ball[:4] if best_ball else None
             state.hoop_bbox_px = det_result.hoops[0][:4] if det_result.hoops else None
 
             # ---------------------------------------------------------------
-            # ÉTAPE 2 — Tracking des joueurs (BotSort + Gap Filling)
-            # ---------------------------------------------------------------
-            # update_players_tracking utilise state.camera.H_matrix pour projeter
-            # les positions en mètres. Si H est None, court_pos_m = None.
-            state = update_players_tracking(
-                tracker,
-                filtered_players,
-                frame,
-                state,
-                team_detector=team_detector,
-                supervisor=supervisor
-            )
-
-            # ---------------------------------------------------------------
-            # ÉTAPE 2.5 — Détection des équipes
-            # ---------------------------------------------------------------
-            team_detector.update(state, frame)
-
-            # ---------------------------------------------------------------
-            # ÉTAPE 3 — Stabilité caméra + YOLO-Pose + Homographie
+            # NOUVELLE ÉTAPE 2 (Ex-Etape 3) — Stabilité caméra & Homographie
+            # On met à jour le repère du monde AVANT de placer les joueurs dedans
             # ---------------------------------------------------------------
 
             # Calcul de la stabilité (basé sur le panier)
@@ -386,25 +368,43 @@ def process_video(
                         # --- AMORTISSEUR D'HOMOGRAPHIE ---
                         if enable_h_smooth and state.camera.H_matrix is not None:
                             # alpha=0.10 => Lissage fort. On absorbe le choc du changement de matrice.
-                            state.camera.H_matrix = smooth_homography(H_new, state.camera.H_matrix, alpha=0.10)
+                            state.camera.H_matrix = smooth_homography(H_new, state.camera.H_matrix, alpha=0.1)
                         else:
                             state.camera.H_matrix = H_new
-                            
-                        _reprojet_all_players(state)
+                        
+                        # ---> SUPPRESSION DE _reprojet_all_players(state) ICI <---
 
             # Mémorisation pour la frame suivante
             if state.hoop_bbox_px is not None:
                 prev_hoop_bbox = state.hoop_bbox_px
+
             # ---------------------------------------------------------------
-            # ÉTAPE 3.5 — Calcul de la cinématique (Vitesse des joueurs)
+            # NOUVELLE ÉTAPE 3 (Ex-Etape 2) — Tracking des joueurs
+            # ---------------------------------------------------------------
+            # Maintenant, l'homographie H_matrix est DÉJÀ à jour.
+            # L'EMA du tracking fera son travail en douceur, sans jamais être court-circuité.
+            state = update_players_tracking(
+                tracker,
+                filtered_players,
+                frame,
+                state,
+                team_detector=team_detector,
+                supervisor=supervisor
+            )
+
+            # ---------------------------------------------------------------
+            # ÉTAPE 3.5 — Détection des équipes
+            # ---------------------------------------------------------------
+            team_detector.update(state, frame)
+
+            # ---------------------------------------------------------------
+            # ÉTAPE 4 — Calcul de la cinématique (Vitesse des joueurs)
             # ---------------------------------------------------------------
             compute_kinematics(state, fps)
 
             # ---------------------------------------------------------------
-            # ÉTAPE 4 — Calibration de référence du panier
+            # ÉTAPE 4.5 — Calibration de référence du panier
             # Conditions : caméra stable ET balle loin du panier
-            # But : mesurer les dimensions "au repos" du panier pour
-            #       alimenter check_hoop_deformation.
             # ---------------------------------------------------------------
             if (
                 state.hoop_bbox_px is not None
