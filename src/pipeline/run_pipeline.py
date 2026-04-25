@@ -39,7 +39,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 # ---------------------------------------------------------------------------
 from core.state import MatchState, CameraState
 from core.detect_objects import DetectionConfig, load_object_detector, run_object_detection
-from core.detect_court import CourtPoseConfig, load_court_detector, run_court_detection, compute_homography
+from core.detect_court import CourtPoseConfig, load_court_detector, run_court_detection, compute_homography, smooth_homography
 from core.tracking import load_tracker, update_players_tracking
 from core.segmentation import SegmentationConfig, load_segmentation_model, encode_frame, get_players_masks, get_net_mask
 from core.detect_shots import (
@@ -174,6 +174,7 @@ def process_video(
     enable_ar: bool = True,
     enable_sam: bool = True,
     enable_supervisor: bool = False,
+    enable_h_smooth: bool = True,
 ) -> None:
 
     # =======================================================================
@@ -264,7 +265,7 @@ def process_video(
 
     # Initialisation du filtre 1 Euro pour la caméra
     # mincutoff=0.01 (lissage fort au repos) | beta=0.50 (réactivité rapide en mouvement)
-    state.camera.kp_filter = OneEuroFilterVectorized(mincutoff=0.0001, beta=0.01)
+    state.camera.kp_filter = OneEuroFilterVectorized(mincutoff=0.001, beta=0.0)
 
     # --- Variables de contrôle inter-frames ---
     prev_hoop_bbox      = None    # Dernière bbox panier connue (pour is_camera_stable)
@@ -280,7 +281,7 @@ def process_video(
     # =======================================================================
     # PRE-FLIGHT : Calibration des équipes
     # =======================================================================
-    team_detector = TeamDetector(calibration_frames=90, history_size=60, calibration_stride=5)
+    team_detector = TeamDetector(calibration_frames=270, history_size=75, calibration_stride=3)
     logger.info("Pre-flight : Apprentissage des couleurs d'équipes...")
     
     for _ in range(team_detector.calibration_frames):
@@ -297,7 +298,7 @@ def process_video(
     # ON REMBOBINE LA VIDÉO À LA FRAME 0 !
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-    with tqdm(total=total, unit="frame", desc="Pipeline V0") as pbar:
+    with tqdm(total=total, unit="frame", desc="Pipeline V1") as pbar:
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -376,12 +377,19 @@ def process_video(
                     # La transition sera fluide car x_prev était calé sur la position stable
                     state.court_keypoints_px = state.camera.kp_filter(current_t, court_result.keypoints_px)
                     state.court_keypoints_conf = court_result.keypoints_conf
-                    
-                    # On recalcule H seulement avec les points lissés
+                
+                  # On recalcule H seulement avec les points lissés
                     court_result.keypoints_px = state.court_keypoints_px
                     H_new = compute_homography(court_result, court_config)
+                    
                     if H_new is not None:
-                        state.camera.H_matrix = H_new
+                        # --- AMORTISSEUR D'HOMOGRAPHIE ---
+                        if enable_h_smooth and state.camera.H_matrix is not None:
+                            # alpha=0.10 => Lissage fort. On absorbe le choc du changement de matrice.
+                            state.camera.H_matrix = smooth_homography(H_new, state.camera.H_matrix, alpha=0.10)
+                        else:
+                            state.camera.H_matrix = H_new
+                            
                         _reprojet_all_players(state)
 
             # Mémorisation pour la frame suivante

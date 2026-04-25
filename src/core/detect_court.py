@@ -174,3 +174,47 @@ def compute_homography(court_result: CourtResult, config: CourtPoseConfig) -> np
         H = H / H[2, 2]
         
     return H
+
+
+# ===========================================================================
+# STABILISATION VIRTUELLE (Les 4 Coins)
+# ===========================================================================
+
+# Les 4 coins du terrain en mètres (0,0 / 28,0 / 28,15 / 0,15)
+COURT_CORNERS_M = np.array([
+    [0.0, 0.0], 
+    [COURT_L, 0.0], 
+    [COURT_L, COURT_W], 
+    [0.0, COURT_W]
+], dtype=np.float32).reshape(-1, 1, 2)
+
+def smooth_homography(H_raw: np.ndarray, H_old: np.ndarray, alpha: float = 0.10) -> np.ndarray:
+    """
+    Lisse une nouvelle matrice d'homographie par rapport à l'ancienne
+    en interpolant la projection des 4 coins du terrain dans l'espace Pixel.
+    Empêche les sauts violents dus au changement de topologie des keypoints.
+    """
+    if H_old is None or H_raw is None:
+        return H_raw
+        
+    try:
+        # 1. On trouve les matrices inverses (Mètres -> Pixels vidéo)
+        H_raw_inv = np.linalg.inv(H_raw)
+        H_old_inv = np.linalg.inv(H_old)
+        
+        # 2. On projette les 4 coins théoriques sur l'image vidéo (en pixels)
+        pts_px_new = cv2.perspectiveTransform(COURT_CORNERS_M, H_raw_inv)
+        pts_px_old = cv2.perspectiveTransform(COURT_CORNERS_M, H_old_inv)
+        
+        # 3. Lissage linéaire (EMA) sur les pixels. 
+        # C'est 100% légal mathématiquement car on lisse des coordonnées 2D d'image.
+        pts_px_smooth = (alpha * pts_px_new) + ((1.0 - alpha) * pts_px_old)
+        
+        # 4. On recalcule l'Homographie "Parfaite" (Pixels -> Mètres)
+        # On utilise 0 (sans RANSAC) car 4 points définissent exactement 1 seule homographie.
+        H_smooth, _ = cv2.findHomography(pts_px_smooth, COURT_CORNERS_M, 0)
+        
+        return H_smooth if H_smooth is not None else H_raw
+    except np.linalg.LinAlgError:
+        # Sécurité mathématique si une matrice est non-inversible
+        return H_raw
