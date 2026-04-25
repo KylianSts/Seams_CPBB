@@ -165,7 +165,7 @@ def compute_homography(court_result: CourtResult, config: CourtPoseConfig) -> np
     H, status = cv2.findHomography(
         np.array(src_pts_px, dtype=np.float32), 
         np.array(dst_pts_m, dtype=np.float32), 
-        cv2.RANSAC, 
+        cv2.USAC_MAGSAC, 
         5.0
     )
     
