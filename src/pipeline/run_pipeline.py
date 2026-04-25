@@ -428,41 +428,59 @@ def process_video(
             # ÉTAPE 5 — Calcul des triggers spatiaux
             # ---------------------------------------------------------------
 
-            # Trigger A : Balle près du panier (Logique "Sticky" + Vecteur Y)
+            # 1. Vérification de la présence dans la GRANDE zone (Trigger de base)
             current_ball_near = is_ball_near_hoop(state.ball_bbox_px, state.hoop_bbox_px)
             ball_detected = state.ball_bbox_px is not None
             
-            # Analyse du vecteur de chute (True si la balle descend vers le bas de l'écran)
+            # 2. Analyse du vecteur de chute (True si la balle descend vers le bas de l'écran)
             ball_falling = is_ball_falling(list(state.ball_history), window=5)
+            
+            # 3. EXCEPTION LAYUP / DUNK (Intersection stricte avec le panier)
+            ball_very_close = False
+            if ball_detected and state.hoop_bbox_px is not None:
+                bx1, by1, bx2, by2 = state.ball_bbox_px
+                hx1, hy1, hx2, hy2 = state.hoop_bbox_px
+                
+                # Tolérance : On élargit légèrement la boîte du panier (ex: 20%) pour capter le contact
+                margin_x = (hx2 - hx1) * 0.2
+                margin_y = (hy2 - hy1) * 0.2
+                
+                # Vérification d'intersection AABB (Axis-Aligned Bounding Box)
+                intersect_x = (bx1 <= hx2 + margin_x) and (bx2 >= hx1 - margin_x)
+                intersect_y = (by1 <= hy2 + margin_y) and (by2 >= hy1 - margin_y)
+                
+                if intersect_x and intersect_y:
+                    ball_very_close = True
 
+            # 4. LA MACHINE À ÉTATS (Le Gatekeeper intelligent)
             if current_ball_near:
                 if not state.is_ball_near_hoop_sticky:
-                    # 1. NOUVELLE ENTRÉE dans la zone
-                    # On EXIGE que la balle soit en phase de redescente (filtre les passes)
-                    if ball_falling:
+                    # La balle est dans la zone, mais l'analyse SAM n'est pas encore active.
+                    # On l'active SI elle descend (Tir classique) OU SI elle frôle l'arceau (Layup en montée)
+                    if ball_falling or ball_very_close:
                         state.is_ball_near_hoop_sticky = True
                         state.last_ball_near_hoop_frame = state.frame_idx
                 else:
-                    # 2. DÉJÀ DANS LA ZONE (Mode Sticky Actif)
+                    # DÉJÀ DANS LA ZONE (Mode Sticky Actif)
                     # On maintient l'état ACTIF même si la balle rebondit (ball_falling = False)
                     state.last_ball_near_hoop_frame = state.frame_idx
                     
             elif ball_detected:
-                # 3. La balle est VUE AILLEURS (hors de la zone) → on désactive immédiatement
+                # La balle est VUE AILLEURS (hors de la grande zone) → on désactive tout immédiatement
                 state.is_ball_near_hoop_sticky = False
                 
             elif (state.frame_idx - state.last_ball_near_hoop_frame) > BALL_LOST_TIMEOUT_FRAMES:
-                # 4. La balle est INVISIBLE depuis trop longtemps → désactivation par timeout
+                # La balle est INVISIBLE depuis trop longtemps → désactivation par timeout
                 state.is_ball_near_hoop_sticky = False
 
-            # On utilise notre variable collante pour la suite du code (SAM et Shots)
+            # On met à jour le dictionnaire global
             ball_near = state.is_ball_near_hoop_sticky 
             state.active_triggers["ball_near_hoop"] = ball_near
 
-            # Trigger B : Logo AR possible (utilise la variable locale permissive !)
+            # Trigger B : Logo AR possible
             ar_possible = (
                 enable_ar
-                and cam_stable_ar  # <-- On utilise la variable calculée à l'étape 2 (ou 3)
+                and cam_stable_ar  # <-- On utilise la variable calculée à l'étape 2
                 and state.camera.H_matrix is not None
             )
             state.active_triggers["ar_active"] = ar_possible
@@ -478,8 +496,10 @@ def process_video(
                         players_in_ar += get_players_in_ar_zone(state.players, ar_bbox)
                 players_in_ar = list(set(players_in_ar))
 
-            # On active le masque joueur dès qu'un joueur est sur le logo (indépendant de SAM filet)
+            # On active le masque joueur dès qu'un joueur est sur le logo
             mask_players_needed = len(players_in_ar) > 0
+            
+            # SAM Filet ne s'active que si la logique intelligente (Tir ou Layup) a validé !
             sam_net_needed      = enable_sam and ball_near and state.hoop_bbox_px is not None
 
             state.active_triggers["sam_net_active"]     = sam_net_needed
