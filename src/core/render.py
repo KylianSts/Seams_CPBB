@@ -43,7 +43,7 @@ CONF_KP_DISPLAY  = 0.50          # Seuil minimum pour afficher un keypoint
 # 1. ANNOTATION DE LA VIDÉO PRINCIPALE
 # ===========================================================================
 
-def draw_detections(frame: np.ndarray, state: MatchState, txt_hoop: bool = False, txt_player: bool = False, show_team_crop: bool = True) -> np.ndarray:
+def draw_detections(frame: np.ndarray, state: MatchState, txt_hoop: bool = False, txt_player: bool = False, show_team_crop: bool = False) -> np.ndarray:
     """Dessine les BBoxes des joueurs, de la balle et du panier."""
     out = frame.copy()
 
@@ -499,7 +499,7 @@ def render_debug_frame(frame: np.ndarray, state: MatchState, sidebar_w: int, mar
 
     # 1. Préparation de la vidéo annotée
     main = draw_zones_and_masks(frame, state, margin_ratio, mask_palyer=False, mask_net=True)
-    main = draw_detections(main, state, txt_hoop=False, txt_player=False, show_team_crop=True)
+    main = draw_detections(main, state, txt_hoop=False, txt_player=False, show_team_crop=False)
 
     # 2. Création du HUD
     hud = build_top_hud(w, state)
