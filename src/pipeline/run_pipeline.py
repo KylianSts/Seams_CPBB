@@ -85,10 +85,10 @@ LOGO_CORNERS_LEFT = np.array([
 ], dtype=np.float32)
 
 LOGO_CORNERS_RIGHT = np.array([
-    [COURT_L - _CX - _HALF, COURT_W - _CY - _HALF],
-    [COURT_L - _CX + _HALF, COURT_W - _CY - _HALF],
-    [COURT_L - _CX + _HALF, COURT_W - _CY + _HALF],
-    [COURT_L - _CX - _HALF, COURT_W - _CY + _HALF],
+    [COURT_L - _CX - _HALF, _CY - _HALF],
+    [COURT_L - _CX + _HALF, _CY - _HALF],
+    [COURT_L - _CX + _HALF, _CY + _HALF],
+    [COURT_L - _CX - _HALF, _CY + _HALF],
 ], dtype=np.float32)
 
 # --- Calibration du panier ---
@@ -218,7 +218,7 @@ def process_video(
         # Logo droite : position miroir sur le terrain
         logo_right = LogoConfig(
             center_x_m=COURT_L - _CX,
-            center_y_m=COURT_W - _CY,
+            center_y_m=_CY, 
             size_m=_SIZE,
         )
         ok_left  = load_ar_assets(logo_left)
@@ -441,9 +441,9 @@ def process_video(
                 bx1, by1, bx2, by2 = state.ball_bbox_px
                 hx1, hy1, hx2, hy2 = state.hoop_bbox_px
                 
-                # Tolérance : On élargit légèrement la boîte du panier (ex: 20%) pour capter le contact
-                margin_x = (hx2 - hx1) * 0.2
-                margin_y = (hy2 - hy1) * 0.2
+                # Tolérance : On élargit légèrement la boîte du panier pour capter le contact
+                margin_x = (hx2 - hx1) * 0.05
+                margin_y = (hy2 - hy1) * 0.05
                 
                 # Vérification d'intersection AABB (Axis-Aligned Bounding Box)
                 intersect_x = (bx1 <= hx2 + margin_x) and (bx2 >= hx1 - margin_x)
