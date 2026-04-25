@@ -25,7 +25,7 @@ class PlayerState:
 
     # --- Cinématique ---
     # File d'attente pour lisser la trajectoire (fenêtre glissante)
-    pos_history_m: deque = field(default_factory=lambda: deque(maxlen=15))
+    pos_history_m: deque = field(default_factory=lambda: deque(maxlen=30))
     speed_kmh: float = 0.0
     accel_ms2: float = 0.0
 

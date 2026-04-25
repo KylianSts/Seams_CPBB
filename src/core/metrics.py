@@ -12,9 +12,14 @@ from scipy.spatial import ConvexHull
 def compute_kinematics(state: MatchState, fps: float) -> None:
     """
     Calcule la vitesse (km/h) et l'accélération (m/s²) par joueur et par équipe.
+    Intègre un lissage long (TV) et une 'Physic Gate' pour filtrer les bugs de projection.
     """
     dt_frame = 1.0 / fps
     team_data = {0: {"speeds": [], "accels": []}, 1: {"speeds": [], "accels": []}}
+
+    # Paramètres de lissage et de sécurité
+    WINDOW_SIZE = 25       # 1 seconde complète à 25fps (lissage fort pour la TV)
+    MAX_SPEED_KMH = 35.0   # Physic Gate : limite humaine (Usain Bolt)
 
     for player in state.players.values():
         if player.court_pos_m is None:
@@ -23,24 +28,31 @@ def compute_kinematics(state: MatchState, fps: float) -> None:
         # 1. Historique de position
         player.pos_history_m.append(player.court_pos_m)
 
-        # 2. Calcul Vitesse (Fenêtre de 5 frames pour lisser)
-        if len(player.pos_history_m) >= 5:
-            p_old = player.pos_history_m[-5]
+        # 2. Calcul Vitesse (Fenêtre longue pour lisser)
+        if len(player.pos_history_m) >= WINDOW_SIZE:
+            p_old = player.pos_history_m[-WINDOW_SIZE]
             p_new = player.pos_history_m[-1]
             dist_m = np.sqrt((p_new[0] - p_old[0])**2 + (p_new[1] - p_old[1])**2)
             
-            # dt pour 4 intervalles entre 5 points
-            dt_window = 4 * dt_frame
+            # dt pour (WINDOW_SIZE - 1) intervalles
+            dt_window = (WINDOW_SIZE - 1) * dt_frame
             new_speed_ms = dist_m / dt_window
             new_speed_kmh = new_speed_ms * 3.6
 
-            # 3. Calcul Accélération (Variation entre l'ancienne vitesse et la nouvelle)
-            # On compare la vitesse actuelle à celle de la frame précédente
-            old_speed_ms = (player.speed_kmh / 3.6)
-            player.accel_ms2 = (new_speed_ms - old_speed_ms) / dt_frame
-            player.speed_kmh = new_speed_kmh
+            # --- 3. LA PHYSIC GATE ---
+            if new_speed_kmh > MAX_SPEED_KMH:
+                # Calcul physiquement impossible (probablement un saut d'homographie)
+                # On annule l'accélération et on GARDE l'ancienne vitesse
+                player.accel_ms2 = 0.0
+                # player.speed_kmh reste intact
+            else:
+                # Comportement normal
+                old_speed_ms = (player.speed_kmh / 3.6)
+                # On calcule l'accélération sur la même fenêtre pour une transition douce
+                player.accel_ms2 = (new_speed_ms - old_speed_ms) / dt_window
+                player.speed_kmh = new_speed_kmh
 
-        # 4. Groupement par équipe (seulement si le joueur bouge > 1km/h pour éviter le bruit)
+        # 4. Groupement par équipe (seulement si le joueur bouge > 1km/h pour éviter le bruit statique)
         if player.team_id in [0, 1] and player.speed_kmh > 1.0:
             team_data[player.team_id]["speeds"].append(player.speed_kmh)
             team_data[player.team_id]["accels"].append(player.accel_ms2)
