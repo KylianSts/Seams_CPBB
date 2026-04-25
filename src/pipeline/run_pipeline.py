@@ -720,6 +720,11 @@ if __name__ == "__main__":
         help="Désactiver le superviseur de tracking (Veto GMM)"
     )
 
+    parser.add_argument(
+        "--no-h-smooth", action="store_true",
+        help="Désactiver l'amortisseur d'homographie (Technique des 4 coins)"
+    )
+
     args = parser.parse_args()
 
     output = args.output or args.video.parent / (args.video.stem + "_demo_v0.mp4")
@@ -731,4 +736,5 @@ if __name__ == "__main__":
         enable_audio=not args.no_audio,
         enable_ar=not args.no_ar,
         enable_sam=not args.no_sam,
+        enable_h_smooth=not args.no_h_smooth,
     )
