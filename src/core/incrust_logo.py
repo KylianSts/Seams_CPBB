@@ -49,7 +49,8 @@ class LogoConfig:
 
 def load_ar_assets(config: LogoConfig) -> bool:
     """
-    Charge le logo en mémoire et pré-calcule ses coordonnées physiques.
+    Charge le logo en mémoire et pré-calcule ses coordonnées physiques
+    pour DEUX positions (Symétrie Axiale sur le même bord de touche).
     À appeler UNE SEULE FOIS dans run_pipeline.py.
     """
     logger.info(f"Chargement de l'asset AR : {config.image_path.name}...")
@@ -67,19 +68,30 @@ def load_ar_assets(config: LogoConfig) -> bool:
         
     config._logo_img = img
 
-    # Pré-calcul des 4 coins du logo en MÈTRES sur le terrain FIBA
+    # --- CALCUL DE LA SYMÉTRIE AXIALE ---
+    COURT_L = 28.0
     half = config.size_m / 2.0
-    cx, cy = config.center_x_m, config.center_y_m
     
-    corners = [
-        [cx - half, cy - half],  # Haut-Gauche
-        [cx + half, cy - half],  # Haut-Droit
-        [cx + half, cy + half],  # Bas-Droit
-        [cx - half, cy + half]   # Bas-Gauche
-    ]
-    config._world_corners = np.array(corners, dtype=np.float32)
+    # Position 1 (Originale, définie dans config)
+    cx1, cy1 = config.center_x_m, config.center_y_m
     
-    logger.info("Asset AR prêt.")
+    # Position 2 (Miroir gauche/droite, mais on GARDE la même profondeur Y)
+    cx2, cy2 = COURT_L - cx1, cy1 
+
+    # On stocke les deux positions dans une liste
+    positions = [(cx1, cy1), (cx2, cy2)]
+    config._world_corners_list = []
+
+    for cx, cy in positions:
+        corners = [
+            [cx - half, cy - half],  # Haut-Gauche
+            [cx + half, cy - half],  # Haut-Droit
+            [cx + half, cy + half],  # Bas-Droit
+            [cx - half, cy + half]   # Bas-Gauche
+        ]
+        config._world_corners_list.append(np.array(corners, dtype=np.float32))
+    
+    logger.info("Asset AR prêt (Double Logo Axiale).")
     return True
 
 
@@ -89,10 +101,10 @@ def load_ar_assets(config: LogoConfig) -> bool:
 
 def apply_virtual_logo(frame: np.ndarray, state: MatchState, config: LogoConfig) -> np.ndarray:
     """
-    Déforme et incruste le logo sur la frame vidéo.
-    Gère automatiquement l'occlusion si des masques de joueurs sont présents dans le state.
+    Déforme et incruste les logos sur la frame vidéo.
+    Gère automatiquement l'occlusion si des masques de joueurs sont présents.
     """
-    if config._logo_img is None or config._world_corners is None:
+    if config._logo_img is None or not hasattr(config, '_world_corners_list'):
         return frame
 
     # 1. Vérification de la calibration caméra
@@ -110,53 +122,47 @@ def apply_virtual_logo(frame: np.ndarray, state: MatchState, config: LogoConfig)
         logger.warning("Matrice d'homographie singulière. Incrustation annulée.")
         return frame
 
-    # 2. Calcul de la déformation du logo
-    # On calcule d'abord comment placer les pixels du PNG carré sur les coordonnées en mètres
-    logo_pixel_corners = np.array([[0, 0], [w_logo, 0], [w_logo, h_logo], [0, h_logo]], dtype=np.float32)
-    H_logo_to_world, _ = cv2.findHomography(logo_pixel_corners, config._world_corners)
-
-    # Matrice finale : Pixels Logo -> Mètres Terrain -> Pixels Frame
-    H_final = H_world_to_frame @ H_logo_to_world
-
-    # 3. Déformation de l'image (Warping)
-    warped_logo = cv2.warpPerspective(
-        config._logo_img, 
-        H_final, 
-        (w_frame, h_frame), 
-        flags=cv2.INTER_LINEAR
-    )
-
-    # Séparation des couleurs (RGB) et de la transparence (Alpha)
-    warped_rgb = warped_logo[..., :3]
-    # Normalisation de l'Alpha entre 0.0 et 1.0, pondérée par l'opacité désirée
-    warped_alpha = (warped_logo[..., 3].astype(np.float32) / 255.0) * config.opacity
-
-    # 4. Gestion de l'occlusion (Masques continus / Feathering)
+    # 2. Pré-calcul du masque d'occlusion global (Optimisation de performance)
+    combined_occlusion = np.zeros((h_frame, w_frame), dtype=np.float32)
     if state.player_masks:
-        # On crée une toile vide de type "float32" au lieu de "bool"
-        combined_occlusion = np.zeros((h_frame, w_frame), dtype=np.float32)
-        
         for mask_float in state.player_masks:
-            # Sécurité pour vérifier que c'est bien un masque float32 (compatible SAM et Capsule)
             if mask_float.dtype == bool:
                 mask_float = mask_float.astype(np.float32)
-                
             if mask_float.shape == combined_occlusion.shape:
-                # On utilise np.maximum pour fusionner les opacités des joueurs 
-                # (empêche l'opacité de dépasser 1.0 s'ils se chevauchent)
                 combined_occlusion = np.maximum(combined_occlusion, mask_float)
-                
-        # Modification progressive de la transparence du logo
-        # Ex: Si le joueur est à 0.8 d'opacité (bord flou), le logo devient à 0.2 d'opacité
-        warped_alpha = warped_alpha * (1.0 - combined_occlusion)
 
-    # 5. Fusion finale (Alpha Blending optimisé via NumPy)
-    out_frame = frame.copy()
-    
-    # Expansion de la dimension alpha pour le broadcast NumPy (H, W) -> (H, W, 1)
-    warped_alpha_3d = warped_alpha[..., np.newaxis]
-    
-    # Formule standard de l'alpha blending : Result = (1 - alpha) * BG + alpha * FG
-    out_frame = out_frame * (1.0 - warped_alpha_3d) + warped_rgb * warped_alpha_3d
+    # Coordonnées pixel d'origine du logo
+    logo_pixel_corners = np.array([[0, 0], [w_logo, 0], [w_logo, h_logo], [0, h_logo]], dtype=np.float32)
 
+    # On convertit la frame en float32 une seule fois pour éviter les pertes de précision lors du blending multiple
+    out_frame = frame.copy().astype(np.float32)
+
+    # 3. Boucle d'incrustation pour chaque logo
+    for world_corners in config._world_corners_list:
+        
+        # Calcul de la matrice finale pour ce logo spécifique
+        H_logo_to_world, _ = cv2.findHomography(logo_pixel_corners, world_corners)
+        H_final = H_world_to_frame @ H_logo_to_world
+
+        # Déformation de l'image (Warping)
+        warped_logo = cv2.warpPerspective(
+            config._logo_img, 
+            H_final, 
+            (w_frame, h_frame), 
+            flags=cv2.INTER_LINEAR
+        )
+
+        # Séparation RGB et calcul de l'Alpha initial
+        warped_rgb = warped_logo[..., :3].astype(np.float32)
+        warped_alpha = (warped_logo[..., 3].astype(np.float32) / 255.0) * config.opacity
+
+        # 4. Application de l'occlusion
+        if state.player_masks:
+            warped_alpha = warped_alpha * (1.0 - combined_occlusion)
+
+        # 5. Fusion finale pour ce logo (Alpha Blending)
+        warped_alpha_3d = warped_alpha[..., np.newaxis]
+        out_frame = out_frame * (1.0 - warped_alpha_3d) + warped_rgb * warped_alpha_3d
+
+    # Reconversion en format d'image standard
     return out_frame.astype(np.uint8)
