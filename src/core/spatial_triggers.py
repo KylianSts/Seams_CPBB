@@ -117,7 +117,7 @@ def is_ball_falling(ball_history: list, window: int = 5, min_dy_px: float = 2.0)
     """
     # S'il n'y a pas assez d'historique, on accepte par défaut pour ne pas bloquer
     if len(ball_history) < window:
-        return True
+        return False
         
     # On extrait les coordonnées Y des X dernières frames
     recent_y = [pos[2] for pos in ball_history[-window:]]
