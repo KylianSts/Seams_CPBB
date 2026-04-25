@@ -52,7 +52,7 @@ from core.detect_shots import (
 )
 from core.detect_audio import AudioConfig, get_match_audio_events
 from core.incrust_logo import LogoConfig, load_ar_assets, apply_virtual_logo
-from core.spatial_triggers import is_ball_near_hoop, get_players_in_ar_zone, is_camera_stable
+from core.spatial_triggers import is_ball_near_hoop, get_players_in_ar_zone, is_camera_stable, is_ball_falling
 from core.render import render_debug_frame
 from core.metrics import compute_kinematics
 from core.detect_team import TeamDetector
@@ -428,21 +428,31 @@ def process_video(
             # ÉTAPE 5 — Calcul des triggers spatiaux
             # ---------------------------------------------------------------
 
-            # Trigger A : Balle près du panier (Logique "Sticky" pour l'occlusion)
+            # Trigger A : Balle près du panier (Logique "Sticky" + Vecteur Y)
             current_ball_near = is_ball_near_hoop(state.ball_bbox_px, state.hoop_bbox_px)
             ball_detected = state.ball_bbox_px is not None
+            
+            # Analyse du vecteur de chute (True si la balle descend vers le bas de l'écran)
+            ball_falling = is_ball_falling(list(state.ball_history), window=5)
 
             if current_ball_near:
-                # 1. La balle est VUE PRÈS du panier → on active et on met à jour le chrono
-                state.is_ball_near_hoop_sticky = True
-                state.last_ball_near_hoop_frame = state.frame_idx
-                
+                if not state.is_ball_near_hoop_sticky:
+                    # 1. NOUVELLE ENTRÉE dans la zone
+                    # On EXIGE que la balle soit en phase de redescente (filtre les passes)
+                    if ball_falling:
+                        state.is_ball_near_hoop_sticky = True
+                        state.last_ball_near_hoop_frame = state.frame_idx
+                else:
+                    # 2. DÉJÀ DANS LA ZONE (Mode Sticky Actif)
+                    # On maintient l'état ACTIF même si la balle rebondit (ball_falling = False)
+                    state.last_ball_near_hoop_frame = state.frame_idx
+                    
             elif ball_detected:
-                # 2. La balle est VUE AILLEURS (hors de la zone) → on désactive immédiatement
+                # 3. La balle est VUE AILLEURS (hors de la zone) → on désactive immédiatement
                 state.is_ball_near_hoop_sticky = False
                 
             elif (state.frame_idx - state.last_ball_near_hoop_frame) > BALL_LOST_TIMEOUT_FRAMES:
-                # 3. La balle est INVISIBLE depuis trop longtemps → désactivation par timeout
+                # 4. La balle est INVISIBLE depuis trop longtemps → désactivation par timeout
                 state.is_ball_near_hoop_sticky = False
 
             # On utilise notre variable collante pour la suite du code (SAM et Shots)
@@ -452,7 +462,7 @@ def process_video(
             # Trigger B : Logo AR possible (utilise la variable locale permissive !)
             ar_possible = (
                 enable_ar
-                and cam_stable_ar  # <-- On utilise la variable calculée à l'étape 3
+                and cam_stable_ar  # <-- On utilise la variable calculée à l'étape 2 (ou 3)
                 and state.camera.H_matrix is not None
             )
             state.active_triggers["ar_active"] = ar_possible
@@ -468,7 +478,7 @@ def process_video(
                         players_in_ar += get_players_in_ar_zone(state.players, ar_bbox)
                 players_in_ar = list(set(players_in_ar))
 
-            # On active le masque joueur dès qu'un joueur est sur le logo (indépendant de SAM)
+            # On active le masque joueur dès qu'un joueur est sur le logo (indépendant de SAM filet)
             mask_players_needed = len(players_in_ar) > 0
             sam_net_needed      = enable_sam and ball_near and state.hoop_bbox_px is not None
 
@@ -682,7 +692,7 @@ def process_video(
 
 if __name__ == "__main__":
 
-    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
+    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_layup.mp4")
     OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
 
     parser = argparse.ArgumentParser(
