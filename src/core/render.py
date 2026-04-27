@@ -173,8 +173,10 @@ def draw_zones_and_masks(frame: np.ndarray, state: MatchState, margin_ratio: flo
 
 def build_top_hud(total_width: int, state: MatchState) -> np.ndarray:
     """
-    Génère le bandeau de debug supérieur.
-    Contient : état des triggers et sifflet (gauche) | scores de tir continus (droite).
+    Génère le bandeau de debug supérieur en 3 zones :
+    Gauche : Indicateurs d'activation (CAM, SAM, AR)
+    Milieu : Métriques de tir (SHOT)
+    Droite : Détections audio (WHISTLE, CROWD)
     """
     HUD_H = 55
     hud = np.full((HUD_H, total_width, 3), C_BG_DARK, dtype=np.uint8)
@@ -184,57 +186,40 @@ def build_top_hud(total_width: int, state: MatchState) -> np.ndarray:
     y = 34  # Ligne de base du texte
 
     def put(img, text, x, color):
-        """Écrit du texte et retourne la nouvelle position X."""
+        """Écrit du texte et retourne la nouvelle position X (dessin de gauche à droite)."""
         cv2.putText(img, text, (int(x), int(y)), FONT_MONO, 0.45, color, 1, cv2.LINE_AA)
         return x + cv2.getTextSize(text, FONT_MONO, 0.45, 1)[0][0] + 12
 
     # ==========================================
-    # 1. INDICATEURS D'ÉTAT (Alignés à gauche)
+    # 1. INDICATEURS D'ACTIVATION (Zone Gauche)
     # ==========================================
     cursor = 15
 
-    # Stabilité caméra (utilise la variable stricte si on a fait la modif précédente)
-    cam_ok = getattr(state.camera, 'is_stable', False) 
-    if hasattr(state.camera, 'is_stable_strict'):
-        cam_ok = state.camera.is_stable_strict
-
-    cursor = put(hud, "CAM:STABLE" if cam_ok else "CAM:MOVING",
-                 cursor, C_OK if cam_ok else C_WARN)
+    # Stabilité caméra
+    cam_ok = getattr(state.camera, 'is_stable_strict', getattr(state.camera, 'is_stable', False))
+    cursor = put(hud, "CAM:STABLE" if cam_ok else "CAM:MOVING", cursor, C_OK if cam_ok else C_WARN)
     put(hud, "|", cursor - 6, C_OFF)
     cursor += 8
 
     # SAM Filet
     sam_net = trig.get("sam_net_active", False)
-    cursor = put(hud, "SAM-NET:ON" if sam_net else "SAM-NET:OFF",
-                 cursor, C_OK if sam_net else C_OFF)
+    cursor = put(hud, "SAM-NET:ON" if sam_net else "SAM-NET:OFF", cursor, C_OK if sam_net else C_OFF)
     put(hud, "|", cursor - 6, C_OFF)
     cursor += 8
 
     # SAM Joueurs
     sam_ply = trig.get("sam_players_active", False)
-    cursor = put(hud, "SAM-PLY:ON" if sam_ply else "SAM-PLY:OFF",
-                 cursor, C_OK if sam_ply else C_OFF)
+    cursor = put(hud, "SAM-PLY:ON" if sam_ply else "SAM-PLY:OFF", cursor, C_OK if sam_ply else C_OFF)
     put(hud, "|", cursor - 6, C_OFF)
     cursor += 8
 
     # Logo AR
     ar_ok = trig.get("ar_active", False)
-    cursor = put(hud, "AR:ON" if ar_ok else "AR:OFF",
-                 cursor, C_OK if ar_ok else C_OFF)
-    put(hud, "|", cursor - 6, C_OFF)
-    cursor += 8
-
-    # Sifflet (Nouveau format sobre)
-    whistle_on = state.is_whistle_active
-    c_whistle = (0, 215, 255) if whistle_on else C_OFF  # Jaune/Orange si actif
-    cursor = put(hud, "WHISTLE:ON" if whistle_on else "WHISTLE:OFF",
-                 cursor, c_whistle)
+    put(hud, "AR:ON" if ar_ok else "AR:OFF", cursor, C_OK if ar_ok else C_OFF)
 
     # ==========================================
-    # 2. SCORES DE TIR (Alignés à droite, toujours visibles)
+    # 2. MÉTRIQUES DE TIR (Zone Milieu)
     # ==========================================
-    
-    # Mapping exact des clés générées dans detect_shots.py
     metrics = [
         ("geometry", "GEOM"),
         ("net_area", "NET_"),
@@ -246,36 +231,70 @@ def build_top_hud(total_width: int, state: MatchState) -> np.ndarray:
 
     scores = state.shot_scores if state.shot_scores else {}
     
-    # On calcule l'affichage de droite à gauche pour bien le coller au bord droit
-    cursor_right = (2*total_width/3)
+    # On positionne ce bloc pour qu'il finisse aux 2/3 de l'écran, ce qui le centre très bien
+    cursor_mid = (2 * total_width / 3) + 20 
     elements_to_draw = []
 
     for key, short_name in reversed(metrics):
         val = scores.get(key, 0.0)
         text = f"{short_name}:{val:.2f}"
         
-        # Logique de couleur selon la valeur du score
         if val == 0.0:
-            color = C_OFF              # Gris foncé (Inactif)
+            color = C_OFF
         elif val >= 0.40:
-            color = C_OK               # Vert (Score fort / Seuil franchi)
+            color = C_OK
         else:
-            color = (200, 200, 200)    # Blanc cassé (Score faible/moyen)
+            color = (200, 200, 200)
 
         tw = cv2.getTextSize(text, FONT_MONO, 0.42, 1)[0][0]
-        cursor_right -= tw
-        elements_to_draw.append((text, cursor_right, color))
-        cursor_right -= 12 # Espacement entre les colonnes
+        cursor_mid -= tw
+        elements_to_draw.append((text, cursor_mid, color))
+        cursor_mid -= 12
 
-    # Ajout du label "SHOT" tout à gauche du bloc
+    # Label "SHOT"
     shot_label = "SHOT  "
     tw = cv2.getTextSize(shot_label, FONT_MONO, 0.42, 1)[0][0]
-    cursor_right -= tw
-    elements_to_draw.append((shot_label, cursor_right, (240, 240, 240)))
+    cursor_mid -= tw
+    elements_to_draw.append((shot_label, cursor_mid, (240, 240, 240)))
 
-    # On dessine tout le bloc des scores
     for text, x_pos, color in elements_to_draw:
         cv2.putText(hud, text, (int(x_pos), int(y)), FONT_MONO, 0.42, color, 1, cv2.LINE_AA)
+
+    # ==========================================
+    # 3. DÉTECTIONS AUDIO (Zone Droite)
+    # ==========================================
+    # On commence à 15 pixels du bord droit de la vidéo et on recule
+    cursor_right = total_width - 15
+
+    # --- Foule (CROWD) ---
+    # getattr permet de ne pas crasher si la variable n'est pas encore dans state.py
+    crowd_on = getattr(state, 'is_crowd_active', False)
+    c_crowd = (50, 100, 255) if crowd_on else C_OFF  # Orange/Rouge (BGR) pour la foule
+    crowd_text = "CROWD:ON" if crowd_on else "CROWD:OFF"
+    
+    tw = cv2.getTextSize(crowd_text, FONT_MONO, 0.45, 1)[0][0]
+    cursor_right -= tw
+    cv2.putText(hud, crowd_text, (int(cursor_right), int(y)), FONT_MONO, 0.45, c_crowd, 1, cv2.LINE_AA)
+    
+    # Séparateur
+    cursor_right -= 15
+    cv2.putText(hud, "|", (int(cursor_right), int(y)), FONT_MONO, 0.45, C_OFF, 1, cv2.LINE_AA)
+    cursor_right -= 8
+
+    # --- Sifflet (WHISTLE) ---
+    whistle_on = getattr(state, 'is_whistle_active', False)
+    c_whistle = (0, 215, 255) if whistle_on else C_OFF  # Jaune (BGR)
+    whistle_text = "WHISTLE:ON" if whistle_on else "WHISTLE:OFF"
+    
+    tw = cv2.getTextSize(whistle_text, FONT_MONO, 0.45, 1)[0][0]
+    cursor_right -= tw
+    cv2.putText(hud, whistle_text, (int(cursor_right), int(y)), FONT_MONO, 0.45, c_whistle, 1, cv2.LINE_AA)
+
+    # Label global "AUDIO"
+    audio_label = "AUDIO  "
+    tw = cv2.getTextSize(audio_label, FONT_MONO, 0.45, 1)[0][0]
+    cursor_right -= tw
+    cv2.putText(hud, audio_label, (int(cursor_right), int(y)), FONT_MONO, 0.45, (240, 240, 240), 1, cv2.LINE_AA)
 
     return hud
 

@@ -92,6 +92,7 @@ class MatchState:
     active_triggers: dict = field(default_factory=dict)
     shot_scores: dict = field(default_factory=dict)
     is_whistle_active: bool = False
+    is_crowd_active: bool = False
 
     # ===========================================================================
     # 6. GESTION DE L'OCCLUSION DE LA BALLE
