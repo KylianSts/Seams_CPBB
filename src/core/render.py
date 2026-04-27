@@ -509,7 +509,7 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     m_b = state.team_metrics[1]
     
     # --- SECTION 1 : CINÉMATIQUE ---
-    y_curr = draw_section("Performance Athlétique", y_curr)
+    y_curr = draw_section("Performance Athletique", y_curr)
     
     # Bloc Vitesse
     y_curr = draw_row("Vitesse Moyenne", m_a["avg_speed"], m_b["avg_speed"], state.avg_speed_kmh, y_curr, " km/h")
@@ -519,7 +519,7 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     y_curr += 15
 
     # Bloc Accélération
-    y_curr = draw_row("Accélération Moy.", m_a["avg_accel"], m_b["avg_accel"], state.avg_accel_ms2, y_curr, " m/s2")
+    y_curr = draw_row("Acceleration Moy.", m_a["avg_accel"], m_b["avg_accel"], state.avg_accel_ms2, y_curr, " m/s2")
     y_curr = draw_row("Ecart-type", m_a["std_accel"], m_b["std_accel"], state.std_accel_ms2, y_curr, " m/s2", is_sub=True)
     y_curr = draw_row("Accel. Min", m_a["min_accel"], m_b["min_accel"], state.min_accel_ms2, y_curr, " m/s2", is_sub=True)
     y_curr = draw_row("Accel. Max", m_a["max_accel"], m_b["max_accel"], state.max_accel_ms2, y_curr, " m/s2", is_sub=True)
