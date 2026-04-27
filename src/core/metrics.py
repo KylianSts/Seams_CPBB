@@ -68,7 +68,7 @@ def detect_attacking_team(state: MatchState) -> tuple[int, tuple]:
 
 
 def evaluate_open_players(state: MatchState, attacking_team: int, target_hoop: tuple, 
-                          iso_threshold_m: float = 1.8, threat_range_m: float = 8.5) -> None:
+                          iso_threshold_m: float = 2.5, threat_range_m: float = 8.5) -> None:
     """
     Marque les joueurs comme 'ouverts' s'ils sont isolés ET dans la zone de menace.
     """
@@ -128,7 +128,7 @@ def compute_kinematics(state: MatchState, fps: float) -> None:
                 player.accel_ms2 = 0.0
             else:
                 old_speed_ms = (player.speed_kmh / 3.6)
-                player.accel_ms2 = (new_speed_ms - old_speed_ms) / dt_window
+                player.accel_ms2 = (new_speed_ms - old_speed_ms) / dt_frame
                 player.speed_kmh = new_speed_kmh
 
         if player.team_id in [0, 1]:
