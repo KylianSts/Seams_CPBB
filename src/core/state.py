@@ -129,4 +129,5 @@ class MatchState:
     # ===========================================================================
     # 8. TACTIQUE & POSSESSION
     # ===========================================================================
-    attacking_team_id: Optional[int] = None  # ID de l'équipe en attaque (0 ou 1)
+    attacking_team_id: Optional[int] = None
+    target_hoop: Optional[Tuple[float, float]] = None
