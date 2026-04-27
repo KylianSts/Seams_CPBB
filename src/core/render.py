@@ -529,7 +529,7 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     # --- SECTION 2 : TACTIQUE ---
     y_curr = draw_section("Placement & Spatialisation", y_curr)
     y_curr = draw_row("Spacing (Aire)", m_a["spacing"], m_b["spacing"], 0, y_curr, " m2")
-    y_curr = draw_row("Occupation Raquette", m_a["paint_count"], m_b["paint_count"], 0, y_curr, " j.")
+    y_curr = draw_row("Occupation Raquette", m_a["paint_count"], m_b["paint_count"], m_a["paint_count"] + m_b["paint_count"], y_curr, " jou.")
 
     y_curr += 35
 
