@@ -157,3 +157,77 @@ def compute_kinematics(state: MatchState, fps: float) -> None:
     else:
         state.avg_accel_ms2 = state.std_accel_ms2 = 0.0
         state.min_accel_ms2 = state.max_accel_ms2 = 0.0
+    
+    # ==========================================
+    # 5. TACTIQUE : ATTAQUE ET JOUEURS OUVERTS
+    # ==========================================
+    attacking_team, target_hoop = detect_attacking_team(state)
+    state.attacking_team_id = attacking_team
+    
+    if attacking_team is not None and target_hoop is not None:
+        evaluate_open_players(state, attacking_team, target_hoop)
+
+
+import math
+import numpy as np
+
+# Constantes des paniers FIBA (X, Y)
+HOOP_LEFT = (1.575, 7.5)
+HOOP_RIGHT = (26.425, 7.5)
+
+def detect_attacking_team(state) -> tuple[int, tuple]:
+    """
+    Déduit l'équipe en attaque et le panier ciblé via la 'Pression Relative'.
+    Retourne (team_id_attaque, coordonnees_panier_attaque) ou (None, None).
+    """
+    team_players = {0: [], 1: []}
+    for p in state.players.values():
+        if p.court_pos_m is not None and p.team_id in [0, 1]:
+            team_players[p.team_id].append(p)
+
+    if len(team_players[0]) == 0 or len(team_players[1]) == 0:
+        return None, None
+
+    # 1. Calcul du centre de gravité (Barycentre X) de tous les joueurs pour savoir où se joue l'action
+    all_x = [p.court_pos_m[0] for p in team_players[0] + team_players[1]]
+    global_center_x = sum(all_x) / len(all_x)
+    
+    # 2. Déduction du panier actif (demi-terrain où se trouvent les joueurs)
+    active_hoop = HOOP_LEFT if global_center_x < 14.0 else HOOP_RIGHT
+    
+    # 3. Calcul de la distance moyenne de chaque équipe vers le panier ACTIF
+    avg_dist = {}
+    for tid in [0, 1]:
+        dists = [math.hypot(p.court_pos_m[0] - active_hoop[0], p.court_pos_m[1] - active_hoop[1]) 
+                 for p in team_players[tid]]
+        avg_dist[tid] = sum(dists) / len(dists)
+        
+    # 4. L'équipe en DÉFENSE est celle qui est en moyenne la plus proche de l'arceau (elle fait barrage).
+    # L'équipe en ATTAQUE est donc l'autre.
+    defending_team = 0 if avg_dist[0] < avg_dist[1] else 1
+    attacking_team = 1 - defending_team
+    
+    return attacking_team, active_hoop
+
+
+def evaluate_open_players(state, attacking_team: int, target_hoop: tuple, 
+                          iso_threshold_m: float = 1.8, threat_range_m: float = 8.5) -> None:
+    """
+    Marque les joueurs comme 'ouverts' s'ils sont isolés ET dans la zone de menace.
+    """
+    for player in state.players.values():
+        player.is_open = False # Reset par défaut
+        
+        # On n'évalue que les joueurs de l'équipe en attaque
+        if player.team_id != attacking_team or player.court_pos_m is None or player.closest_defender_dist_m is None:
+            continue
+            
+        # 1. Distance au panier attaqué
+        dist_to_hoop = math.hypot(player.court_pos_m[0] - target_hoop[0], player.court_pos_m[1] - target_hoop[1])
+        
+        # 2. Validation : Isolé + Menace
+        is_isolated = player.closest_defender_dist_m >= iso_threshold_m
+        is_a_threat = dist_to_hoop <= threat_range_m
+        
+        if is_isolated and is_a_threat:
+            player.is_open = True

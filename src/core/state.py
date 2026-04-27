@@ -23,6 +23,7 @@ class PlayerState:
     has_ball: bool = False
     is_lost: bool = False
     closest_defender_dist_m: Optional[float] = None
+    is_open: bool = False
 
     # --- Cinématique ---
     # File d'attente pour lisser la trajectoire (fenêtre glissante)
@@ -124,3 +125,8 @@ class MatchState:
             "spacing": 0.0, "paint_count": 0.0
         }
     })
+
+    # ===========================================================================
+    # 8. TACTIQUE & POSSESSION
+    # ===========================================================================
+    attacking_team_id: Optional[int] = None  # ID de l'équipe en attaque (0 ou 1)
