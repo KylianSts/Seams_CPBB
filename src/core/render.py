@@ -393,95 +393,115 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     # --- SÉPARATEUR GAUCHE ET PLACEHOLDER DASHBOARD ---
     cv2.line(sidebar, (0, 0), (0, sidebar_h), (60, 60, 70), 2)
 
+   # ==========================================
+    # ZONE DASHBOARD TACTIQUE (PREMIUM UI)
     # ==========================================
-    # ZONE DASHBOARD TACTIQUE
-    # ==========================================
-    # Ligne pour délimiter visuellement la zone du dashboard
+    # Ligne supérieure de délimitation élégante
     dash_start_y = mg_y + court_px_h + 30
-    cv2.line(sidebar, (0, dash_start_y), (sidebar_w, dash_start_y), (60, 60, 70), 2)
+    cv2.line(sidebar, (mg_x, dash_start_y), (sidebar_w - mg_x, dash_start_y), (80, 80, 90), 1)
     
-    # Coordonnées des colonnes (Élargies pour respirer)
-    COL_LBL = mg_x
-    COL_A   = mg_x + 220
-    COL_B   = mg_x + 380
-    COL_DIF = mg_x + 540
+    # Redistribution des colonnes pour intégrer la colonne "TOTAL"
+    # Basé sur une sidebar_w de 900px
+    COL_LBL = mg_x + 10
+    COL_A   = mg_x + 240
+    COL_B   = mg_x + 390
+    COL_ALL = mg_x + 540
+    COL_DIF = mg_x + 690
     
-    y_curr = dash_start_y + 35
+    y_curr = dash_start_y + 40
     
-    # En-têtes de colonnes
-    cv2.putText(sidebar, "METRIQUE", (COL_LBL, y_curr), FONT_MONO, 0.45, C_OFF, 1, cv2.LINE_AA)
-    cv2.putText(sidebar, "EQUIPE A", (COL_A, y_curr), FONT_MONO, 0.45, C_TEAM_A, 1, cv2.LINE_AA)
-    cv2.putText(sidebar, "EQUIPE B", (COL_B, y_curr), FONT_MONO, 0.45, C_TEAM_B, 1, cv2.LINE_AA)
-    cv2.putText(sidebar, "DIFF.",    (COL_DIF, y_curr), FONT_MONO, 0.45, C_WARN, 1, cv2.LINE_AA)
+    # En-têtes (Typographie épurée et grise)
+    header_color = (130, 130, 140)
+    cv2.putText(sidebar, "METRIQUE", (COL_LBL, y_curr), FONT_MONO, 0.42, header_color, 1, cv2.LINE_AA)
+    cv2.putText(sidebar, "EQUIPE A", (COL_A, y_curr), FONT_MONO, 0.42, C_TEAM_A, 1, cv2.LINE_AA)
+    cv2.putText(sidebar, "EQUIPE B", (COL_B, y_curr), FONT_MONO, 0.42, C_TEAM_B, 1, cv2.LINE_AA)
+    cv2.putText(sidebar, "MATCH",    (COL_ALL, y_curr), FONT_MONO, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
+    cv2.putText(sidebar, "DIFF.",    (COL_DIF, y_curr), FONT_MONO, 0.42, C_WARN, 1, cv2.LINE_AA)
     
-    cv2.line(sidebar, (mg_x, y_curr + 10), (sidebar_w - mg_x, y_curr + 10), (60, 60, 70), 1)
+    cv2.line(sidebar, (mg_x, y_curr + 15), (sidebar_w - mg_x, y_curr + 15), (50, 50, 60), 1)
     
-    y_curr += 35
+    y_curr += 45
 
     def draw_section(title: str, y: int) -> int:
-        """Dessine un séparateur de section avec un fond gris."""
-        cv2.rectangle(sidebar, (mg_x, y - 18), (sidebar_w - mg_x, y + 6), (25, 30, 35), -1)
-        cv2.putText(sidebar, title, (mg_x + 10, y - 2), FONT_MONO, 0.45, (150, 150, 160), 1, cv2.LINE_AA)
-        return y + 30
+        """Dessine un titre de section sobre avec un accent de couleur discret."""
+        cv2.putText(sidebar, title.upper(), (mg_x + 5, y), FONT_MONO, 0.48, (180, 180, 190), 1, cv2.LINE_AA)
+        cv2.line(sidebar, (mg_x, y + 10), (mg_x + 100, y + 10), C_WARN, 2)
+        return y + 40
     
-    def draw_row(label: str, val_a: float, val_b: float, y_pos: int, unit: str = "", is_int: bool = False) -> int:
-        """Dessine une ligne de métrique et incrémente la position Y automatiquement."""
-        # --- MODIFICATION ICI : On force l'arrondi à l'entier pour TOUT le monde ---
-        # Si tu veux garder une décimale pour la vitesse (ex: 24.1), mets {:.1f}
-        # Mais pour de la TV "propre", l'arrondi entier {:.0f} est souvent mieux.
+    def draw_row(label: str, val_a: float, val_b: float, val_all: float, y_pos: int, unit: str = "", is_sub: bool = False) -> int:
+        """Dessine une ligne avec gestion de l'indentation et du style hiérarchique."""
+        font_scale = 0.38 if is_sub else 0.45
+        label_color = (160, 160, 170) if is_sub else (230, 230, 240)
+        val_color = (130, 130, 140) if is_sub else (255, 255, 255)
+        indent = 25 if is_sub else 0
+        
         fmt = "{:.0f}" 
         str_a = f"{fmt.format(val_a)}{unit}"
         str_b = f"{fmt.format(val_b)}{unit}"
+        str_all = f"{fmt.format(val_all)}{unit}"
         
+        # Calcul de la différence (uniquement pour les métriques principales)
         diff = val_a - val_b
-        # On arrondit aussi la différence pour éviter les "+0" ou "-0"
-        diff_rounded = round(diff) 
-        diff_txt = f"{'+' if diff_rounded > 0 else ''}{diff_rounded}"
-        
-        cv2.putText(sidebar, label, (COL_LBL + 10, y_pos), FONT_MONO, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
-        cv2.putText(sidebar, str_a, (COL_A, y_pos), FONT_MONO, 0.45, (255,255,255), 1, cv2.LINE_AA)
-        cv2.putText(sidebar, str_b, (COL_B, y_pos), FONT_MONO, 0.45, (255,255,255), 1, cv2.LINE_AA)
-        
-        # Le zéro parfait n'existe pas, on vérifie l'arrondi
-        diff_color = C_OFF if abs(diff_rounded) == 0 else C_WARN
-        cv2.putText(sidebar, diff_txt, (COL_DIF, y_pos), FONT_MONO, 0.45, diff_color, 1, cv2.LINE_AA)
+        diff_val = round(diff)
+        diff_txt = f"{'+' if diff_val > 0 else ''}{diff_val}"
+        diff_color = (80, 80, 90) if abs(diff_val) == 0 else C_WARN
 
-        return y_pos + 45
+        # Affichage
+        cv2.putText(sidebar, label, (COL_LBL + indent, y_pos), FONT_MONO, font_scale, label_color, 1, cv2.LINE_AA)
+        cv2.putText(sidebar, str_a, (COL_A, y_pos), FONT_MONO, font_scale, val_color, 1, cv2.LINE_AA)
+        cv2.putText(sidebar, str_b, (COL_B, y_pos), FONT_MONO, font_scale, val_color, 1, cv2.LINE_AA)
+        cv2.putText(sidebar, str_all, (COL_ALL, y_pos), FONT_MONO, font_scale, val_color, 1, cv2.LINE_AA)
+        
+        if not is_sub:
+            cv2.putText(sidebar, diff_txt, (COL_DIF, y_pos), FONT_MONO, font_scale, diff_color, 1, cv2.LINE_AA)
 
-    metrics_a = state.team_metrics[0]
-    metrics_b = state.team_metrics[1]
+        return y_pos + (30 if is_sub else 45)
+
+    m_a = state.team_metrics[0]
+    m_b = state.team_metrics[1]
     
     # --- SECTION 1 : CINÉMATIQUE ---
-    y_curr = draw_section("CINEMATIQUE (Moyennes lissées)", y_curr)
-    y_curr = draw_row("Vitesse Moy.", metrics_a["avg_speed"], metrics_b["avg_speed"], y_curr, " km/h")
-    y_curr = draw_row("Ecart-Type V.", metrics_a["std_speed"], metrics_b["std_speed"], y_curr, " km/h")
-    y_curr = draw_row("Accel. Moy.",  metrics_a["avg_accel"], metrics_b["avg_accel"], y_curr, " m/s2")
-    y_curr = draw_row("Ecart-Type A.", metrics_a["std_accel"], metrics_b["std_accel"], y_curr, " m/s2")
+    y_curr = draw_section("Performance Athlétique", y_curr)
     
-    y_curr += 10 # Espace supplémentaire
-    
-    # --- SECTION 2 : TACTIQUE ---
-    y_curr = draw_section("PLACEMENT & SPATIALISATION", y_curr)
-    y_curr = draw_row("Spacing (Aire)", metrics_a["spacing"], metrics_b["spacing"], y_curr, " m2")
-    y_curr = draw_row("Joueurs en Raquette", metrics_a["paint_count"], metrics_b["paint_count"], y_curr, "", is_int=True)
-
+    # Bloc Vitesse
+    y_curr = draw_row("Vitesse Moyenne", m_a["avg_speed"], m_b["avg_speed"], state.avg_speed_kmh, y_curr, " km/h")
+    y_curr = draw_row("Ecart-type", m_a["std_speed"], m_b["std_speed"], state.std_speed_kmh, y_curr, " km/h", is_sub=True)
+    y_curr = draw_row("Vitesse Min", m_a["min_speed"], m_b["min_speed"], state.min_speed_kmh, y_curr, " km/h", is_sub=True)
+    y_curr = draw_row("Vitesse Max", m_a["max_speed"], m_b["max_speed"], state.max_speed_kmh, y_curr, " km/h", is_sub=True)
     y_curr += 15
 
-    # --- 3. BLOC D'ALERTE ENCOMBREMENT ---
-    total_paint = metrics_a["paint_count"] + metrics_b["paint_count"]
+    # Bloc Accélération
+    y_curr = draw_row("Accélération Moy.", m_a["avg_accel"], m_b["avg_accel"], state.avg_accel_ms2, y_curr, " m/s2")
+    y_curr = draw_row("Ecart-type", m_a["std_accel"], m_b["std_accel"], state.std_accel_ms2, y_curr, " m/s2", is_sub=True)
+    y_curr = draw_row("Accel. Min", m_a["min_accel"], m_b["min_accel"], state.min_accel_ms2, y_curr, " m/s2", is_sub=True)
+    y_curr = draw_row("Accel. Max", m_a["max_accel"], m_b["max_accel"], state.max_accel_ms2, y_curr, " m/s2", is_sub=True)
     
-    # La boîte devient rouge vif si la raquette est surpeuplée
-    alert_color = (60, 60, 200) if total_paint > 4 else (35, 40, 45)
-    text_color = (255, 255, 255) if total_paint > 4 else (150, 150, 150)
+    y_curr += 25
     
-    cv2.rectangle(sidebar, (mg_x, y_curr), (sidebar_w - mg_x, y_curr + 35), alert_color, -1)
-    cv2.rectangle(sidebar, (mg_x, y_curr), (sidebar_w - mg_x, y_curr + 35), (60, 60, 70), 1) # Bordure
+    # --- SECTION 2 : TACTIQUE ---
+    y_curr = draw_section("Placement & Spatialisation", y_curr)
+    y_curr = draw_row("Spacing (Aire)", m_a["spacing"], m_b["spacing"], 0, y_curr, " m2")
+    y_curr = draw_row("Occupation Raquette", m_a["paint_count"], m_b["paint_count"], 0, y_curr, " j.")
 
-    alert_txt = f"ENCOMBREMENT TOTAL RAQUETTES : {int(total_paint)} JOUEURS"
-    if total_paint > 4:
-        alert_txt += "  [ ALERTE REBOND / POST-UP ]"
+    y_curr += 35
+
+    # --- BLOC D'ALERTE (Style épuré) ---
+    total_paint = m_a["paint_count"] + m_b["paint_count"]
+    alert_active = total_paint > 4
+    
+    # Boîte minimaliste : Fond sombre avec bordure fine
+    alert_bg = (20, 20, 25)
+    alert_border = C_WARN if alert_active else (60, 60, 70)
+    
+    cv2.rectangle(sidebar, (mg_x, y_curr), (sidebar_w - mg_x, y_curr + 45), alert_bg, -1)
+    cv2.rectangle(sidebar, (mg_x, y_curr), (sidebar_w - mg_x, y_curr + 45), alert_border, 1)
+
+    alert_txt = f"CHARGES RAQUETTES : {int(total_paint)} JOUEURS"
+    if alert_active:
+        alert_txt += " | ALERTE REBOND"
         
-    cv2.putText(sidebar, alert_txt, (mg_x + 15, y_curr + 23), FONT_MONO, 0.45, text_color, 1, cv2.LINE_AA)
+    text_color = C_OK if not alert_active else C_WARN
+    cv2.putText(sidebar, alert_txt, (mg_x + 20, y_curr + 28), FONT_MONO, 0.42, text_color, 1, cv2.LINE_AA)
 
     return sidebar
 
@@ -499,7 +519,7 @@ def render_debug_frame(frame: np.ndarray, state: MatchState, sidebar_w: int, mar
 
     # 1. Préparation de la vidéo annotée
     main = draw_zones_and_masks(frame, state, margin_ratio, mask_palyer=False, mask_net=True)
-    main = draw_detections(main, state, txt_hoop=False, txt_player=False, show_team_crop=False)
+    main = draw_detections(main, state, txt_hoop=False, txt_player=True, show_team_crop=False)
 
     # 2. Création du HUD
     hud = build_top_hud(w, state)
