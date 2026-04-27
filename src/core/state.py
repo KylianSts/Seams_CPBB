@@ -22,6 +22,7 @@ class PlayerState:
     team_id: Optional[int] = None
     has_ball: bool = False
     is_lost: bool = False
+    closest_defender_dist_m: Optional[float] = None
 
     # --- Cinématique ---
     # File d'attente pour lisser la trajectoire (fenêtre glissante)
@@ -100,20 +101,26 @@ class MatchState:
     # ===========================================================================
     # 7. MÉTRIQUES GLOBALES (Cinématique)
     # ===========================================================================
+    # 7. MÉTRIQUES GLOBALES (Cinématique)
     avg_speed_kmh: float = 0.0
     std_speed_kmh: float = 0.0
+    min_speed_kmh: float = 0.0
+    max_speed_kmh: float = 0.0
+
+    avg_accel_ms2: float = 0.0
+    std_accel_ms2: float = 0.0
+    min_accel_ms2: float = 0.0
+    max_accel_ms2: float = 0.0
 
     team_metrics: Dict[int, Dict[str, float]] = field(default_factory=lambda: {
         0: {
-            "avg_speed": 0.0, "std_speed": 0.0, 
-            "avg_accel": 0.0, "std_accel": 0.0,
-            "spacing": 0.0,      # Aire en m²
-            "paint_count": 0.0   # Nb joueurs dans la raquette
+            "avg_speed": 0.0, "std_speed": 0.0, "min_speed": 0.0, "max_speed": 0.0,
+            "avg_accel": 0.0, "std_accel": 0.0, "min_accel": 0.0, "max_accel": 0.0,
+            "spacing": 0.0, "paint_count": 0.0
         },
         1: {
-            "avg_speed": 0.0, "std_speed": 0.0, 
-            "avg_accel": 0.0, "std_accel": 0.0,
-            "spacing": 0.0,
-            "paint_count": 0.0
+            "avg_speed": 0.0, "std_speed": 0.0, "min_speed": 0.0, "max_speed": 0.0,
+            "avg_accel": 0.0, "std_accel": 0.0, "min_accel": 0.0, "max_accel": 0.0,
+            "spacing": 0.0, "paint_count": 0.0
         }
     })
