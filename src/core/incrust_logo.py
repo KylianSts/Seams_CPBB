@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LogoConfig:
-    image_path: Path = Path("data/demos/assets/cenergy.png")
+    image_path: Path = Path("data/demos/assets/veolia.png")
     center_x_m: float = 2.285
     center_y_m: float = 12.0
     size_m: float = 2.0
@@ -27,25 +27,40 @@ class LogoConfig:
     _world_corners: Optional[np.ndarray] = field(default=None, init=False)
 
 def load_ar_assets(config: LogoConfig) -> bool:
-    """Charge UN SEUL logo et calcule ses 4 coins en mètres."""
+    """Charge UN SEUL logo et calcule ses 4 coins en mètres en respectant l'aspect ratio."""
     if not config.image_path.exists():
+        logger.error(f"Image logo introuvable : {config.image_path}")
         return False
 
     img = cv2.imread(str(config.image_path), cv2.IMREAD_UNCHANGED)
     if img is None or img.ndim != 3 or img.shape[2] != 4:
+        logger.error("Le logo doit être un PNG valide avec un canal Alpha (Transparence).")
         return False
         
     config._logo_img = img
 
-    half = config.size_m / 2.0
+    # 1. Calcul du ratio de l'image (Largeur / Hauteur)
+    h_img, w_img = img.shape[:2]
+    aspect_ratio = w_img / float(h_img)
+
+    # 2. Dimensions réelles en mètres sur le terrain
+    # config.size_m dicte la largeur totale. La hauteur s'adapte.
+    real_width_m = config.size_m
+    real_height_m = config.size_m / aspect_ratio
+
+    half_w = real_width_m / 2.0
+    half_h = real_height_m / 2.0
+    
     cx, cy = config.center_x_m, config.center_y_m
     
+    # 3. Définition des 4 coins rectangulaires autour du centre
     corners = [
-        [cx - half, cy - half],
-        [cx + half, cy - half],
-        [cx + half, cy + half],
-        [cx - half, cy + half]
+        [cx - half_w, cy - half_h], # Haut-Gauche
+        [cx + half_w, cy - half_h], # Haut-Droit
+        [cx + half_w, cy + half_h], # Bas-Droit
+        [cx - half_w, cy + half_h]  # Bas-Gauche
     ]
+    
     config._world_corners = np.array(corners, dtype=np.float32)
     return True
 
