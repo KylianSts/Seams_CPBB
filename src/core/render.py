@@ -369,6 +369,32 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     cv2.circle(sidebar, (cx_b_l, cy_b_l), max(2, int(0.225 * sc)), C_LINE, lw, cv2.LINE_AA)
     cx_b_r, cy_b_r = court_to_px(26.425, 7.5)
     cv2.circle(sidebar, (cx_b_r, cy_b_r), max(2, int(0.225 * sc)), C_LINE, lw, cv2.LINE_AA)
+    
+    # ==========================================
+    # INDICATEUR DE DIRECTION D'ATTAQUE
+    # ==========================================
+    if state.attacking_team_id is not None:
+        # 1. Calcul du centre horizontal de la minimap
+        center_x = mg_x + (court_px_w // 2)
+        arrow_y = mg_y + court_px_h + 15 # 15 pixels sous le terrain
+        
+        # 2. Détermination de la direction et de la couleur
+        # On suppose que Team 0 attaque à droite et Team 1 à gauche (ou inversement selon ton detect_attacking_team)
+        # Ici, on utilise la logique de ton detect_attacking_team
+        is_attacking_right = (state.attacking_team_id == 0) # À adapter selon tes tests
+        color = C_TEAM_A if state.attacking_team_id == 0 else C_TEAM_B
+        
+        # 3. Dessin de la flèche (Simple triangle)
+        tip_x = center_x + 20 if is_attacking_right else center_x - 20
+        base_x = center_x - 10 if is_attacking_right else center_x + 10
+        
+        pts = np.array([
+            [base_x, arrow_y - 8],
+            [base_x, arrow_y + 8],
+            [tip_x, arrow_y]
+        ], np.int32)
+        
+        cv2.fillPoly(sidebar, [pts], color, cv2.LINE_AA)
 
     # ==========================================
     # AFFICHAGE DES JOUEURS
@@ -389,6 +415,19 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
 
         cv2.circle(sidebar, (px, py), dot_r, color, -1, cv2.LINE_AA)
         cv2.circle(sidebar, (px, py), dot_r, (255, 255, 255), 2, cv2.LINE_AA) 
+
+        # HALO VERT TOURNANT (Si ouvert)
+        if getattr(player, 'is_open', False):
+            # L'angle dépend de la frame_idx pour créer l'animation
+            angle_start = (state.frame_idx * 10) % 360
+            angle_end = angle_start + 180 # On dessine un demi-cercle tournant
+            
+            # Couleur vert néon premium
+            C_OPEN = (100, 255, 100)
+            
+            # Dessin de l'arc tournant autour du joueur
+            cv2.ellipse(sidebar, (px, py), (dot_r + 5, dot_r + 5), 
+                        0, angle_start, angle_end, C_OPEN, 2, cv2.LINE_AA)
 
     # --- SÉPARATEUR GAUCHE ET PLACEHOLDER DASHBOARD ---
     cv2.line(sidebar, (0, 0), (0, sidebar_h), (60, 60, 70), 2)
