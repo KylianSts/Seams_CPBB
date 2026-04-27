@@ -142,7 +142,7 @@ def update_players_tracking(
                 old_speed = state.players[track_id].speed_kmh
                 old_court_pos = state.players[track_id].court_pos_m 
             else:
-                old_history = deque(maxlen=15)
+                old_history = deque(maxlen=30)
                 old_speed = 0.0
                 old_court_pos = None 
             # ------------------------------------------------
