@@ -151,7 +151,7 @@ def update_players_tracking(
             if raw_court_pos is not None:
                 if old_court_pos is not None:
                     # Formule du lissage
-                    ALPHA = 0.10  
+                    ALPHA = 0.30  
                     smooth_x = (ALPHA * raw_court_pos[0]) + ((1.0 - ALPHA) * old_court_pos[0])
                     smooth_y = (ALPHA * raw_court_pos[1]) + ((1.0 - ALPHA) * old_court_pos[1])
                     final_court_pos = (smooth_x, smooth_y)

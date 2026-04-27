@@ -1,7 +1,7 @@
 """
 run_pipeline.py
 ---------------
-Pipeline de démonstration V0 — Analyse d'un match de basket en broadcast.
+Pipeline de démonstration V2 — Analyse d'un match de basket en broadcast.
 
 LOGIQUE FRAME PAR FRAME :
   1.  Détection objets     → RF-DETR   (joueurs, balle, arbitres, panier)
@@ -298,7 +298,7 @@ def process_video(
     # ON REMBOBINE LA VIDÉO À LA FRAME 0 !
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-    with tqdm(total=total, unit="frame", desc="Pipeline V1") as pbar:
+    with tqdm(total=total, unit="frame", desc="Pipeline V2") as pbar:
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -712,11 +712,11 @@ def process_video(
 
 if __name__ == "__main__":
 
-    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_layup.mp4")
+    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
     OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
 
     parser = argparse.ArgumentParser(
-        description="Pipeline de démonstration basket V0",
+        description="Pipeline de démonstration basket V2",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -726,7 +726,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output", type=Path, default=OUTPUT_PATH,
         help="Chemin de la vidéo de sortie (mp4). "
-             "Par défaut : <nom_video>_demo_v0.mp4"
+             "Par défaut : <nom_video>_demo_v2.mp4"
     )
     parser.add_argument(
         "--device", type=int, default=0,
@@ -757,7 +757,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    output = args.output or args.video.parent / (args.video.stem + "_demo_v0.mp4")
+    output = args.output or args.video.parent / (args.video.stem + "_demo_v2.mp4")
 
     process_video(
         video_path=args.video,

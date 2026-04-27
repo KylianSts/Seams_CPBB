@@ -1,7 +1,7 @@
 """
 render.py
 ---------
-Moteur de rendu graphique (Debug V1).
+Moteur de rendu graphique (Debug V2).
 Prend le MatchState et dessine toutes les informations visuelles.
 """
 
@@ -477,13 +477,14 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
         return y + 40
     
     def draw_row(label: str, val_a: float, val_b: float, val_all: float, y_pos: int, unit: str = "", is_sub: bool = False) -> int:
-        """Dessine une ligne avec gestion de l'indentation et du style hiérarchique."""
+        """Dessine une ligne iso_threshold_m gestion de l'indentation et du style hiérarchique."""
         font_scale = 0.38 if is_sub else 0.45
         label_color = (160, 160, 170) if is_sub else (230, 230, 240)
         val_color = (130, 130, 140) if is_sub else (255, 255, 255)
         indent = 25 if is_sub else 0
         
-        fmt = "{:.0f}" 
+        fmt = "{:.1f}" if "m/s2" in unit else "{:.0f}" 
+        
         str_a = f"{fmt.format(val_a)}{unit}"
         str_b = f"{fmt.format(val_b)}{unit}"
         str_all = f"{fmt.format(val_all)}{unit}"
