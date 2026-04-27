@@ -373,27 +373,36 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     # ==========================================
     # INDICATEUR DE DIRECTION D'ATTAQUE
     # ==========================================
-    if state.attacking_team_id is not None:
-        # 1. Calcul du centre horizontal de la minimap
+    target_hoop = getattr(state, 'target_hoop', None)
+    
+    if state.attacking_team_id is not None and target_hoop is not None:
         center_x = mg_x + (court_px_w // 2)
-        arrow_y = mg_y + court_px_h + 15 # 15 pixels sous le terrain
+        arrow_y = mg_y + court_px_h + 18  # Légèrement plus bas pour respirer
         
-        # 2. Détermination de la direction et de la couleur
-        # On suppose que Team 0 attaque à droite et Team 1 à gauche (ou inversement selon ton detect_attacking_team)
-        # Ici, on utilise la logique de ton detect_attacking_team
-        is_attacking_right = (state.attacking_team_id == 0) # À adapter selon tes tests
+        # Logique corrigée : La flèche pointe vers le panier attaqué
+        # Si le panier attaqué est à droite (X > 14m), la flèche pointe à droite
+        is_attacking_right = (target_hoop[0] > 14.0)
+        dir_sign = 1 if is_attacking_right else -1
+        
         color = C_TEAM_A if state.attacking_team_id == 0 else C_TEAM_B
         
-        # 3. Dessin de la flèche (Simple triangle)
-        tip_x = center_x + 20 if is_attacking_right else center_x - 20
-        base_x = center_x - 10 if is_attacking_right else center_x + 10
-        
+        # Coordonnées d'une vraie flèche (Tige + Pointe)
         pts = np.array([
-            [base_x, arrow_y - 8],
-            [base_x, arrow_y + 8],
-            [tip_x, arrow_y]
+            [center_x - 18 * dir_sign, arrow_y - 4],  # Haut de la tige
+            [center_x + 6 * dir_sign,  arrow_y - 4],  # Intersection tige/pointe haut
+            [center_x + 6 * dir_sign,  arrow_y - 10], # Extrémité haute de la pointe
+            [center_x + 24 * dir_sign, arrow_y],      # Le bout de la flèche (Tip)
+            [center_x + 6 * dir_sign,  arrow_y + 10], # Extrémité basse de la pointe
+            [center_x + 6 * dir_sign,  arrow_y + 4],  # Intersection tige/pointe bas
+            [center_x - 18 * dir_sign, arrow_y + 4]   # Bas de la tige
         ], np.int32)
         
+        # Ombre portée très subtile pour détacher la flèche du fond
+        pts_shadow = pts.copy()
+        pts_shadow[:, 1] += 2 # Décalage vers le bas
+        cv2.fillPoly(sidebar, [pts_shadow], (20, 20, 25), cv2.LINE_AA)
+        
+        # Remplissage principal
         cv2.fillPoly(sidebar, [pts], color, cv2.LINE_AA)
 
     # ==========================================
