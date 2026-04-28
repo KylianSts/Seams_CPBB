@@ -122,11 +122,10 @@ class OneEuroFilter:
 
         return x_hat
     
-def filter_isolated_players(raw_players: list, max_overlap_ratio: float = 0.10) -> list:
+def filter_isolated_players(raw_players: list, max_overlap_ratio: float = 0.05) -> list:
     """
-    Conserve uniquement les joueurs "isolés".
-    Tolère une légère superposition (ex: 10% de l'aire de la BBox) pour ne pas 
-    perdre de données sur des contacts mineurs.
+    Conserve uniquement les joueurs dont le TORSE n'est pas occlusé par un autre TORSE.
+    Utilise les mêmes ratios de sous-boîte que detect_team.py pour valider la donnée.
     """
     n = len(raw_players)
     if n == 0:
@@ -134,39 +133,48 @@ def filter_isolated_players(raw_players: list, max_overlap_ratio: float = 0.10) 
 
     is_occluded = [False] * n
 
+    # Fonction locale pour extraire les coordonnées de la sous-boîte (Torse)
+    def get_torso_box(box):
+        x1, y1, x2, y2 = box[:4]
+        w, h = x2 - x1, y2 - y1
+        tx1 = x1 + (w * 0.25)
+        ty1 = y1 + (h * 0.20)
+        tx2 = x2 - (w * 0.25)
+        ty2 = y2 - (h * 0.40)
+        return tx1, ty1, tx2, ty2
+
     for i in range(n):
         if is_occluded[i]: 
             continue
 
-        bx1, by1, bx2, by2, conf = raw_players[i]
-        # Calcul de l'aire totale du joueur A
-        area_i = (bx2 - bx1) * (by2 - by1)
+        # Torse du joueur A
+        t_ix1, t_iy1, t_ix2, t_iy2 = get_torso_box(raw_players[i])
+        area_i = max(0, t_ix2 - t_ix1) * max(0, t_iy2 - t_iy1)
 
         for j in range(i + 1, n):
-            cx1, cy1, cx2, cy2, conf2 = raw_players[j]
-            # Calcul de l'aire totale du joueur B
-            area_j = (cx2 - cx1) * (cy2 - cy1)
+            # Torse du joueur B
+            t_jx1, t_jy1, t_jx2, t_jy2 = get_torso_box(raw_players[j])
+            area_j = max(0, t_jx2 - t_jx1) * max(0, t_jy2 - t_jy1)
 
-            # 1. Calcul des coordonnées du rectangle d'intersection
-            ix1 = max(bx1, cx1)
-            iy1 = max(by1, cy1)
-            ix2 = min(bx2, cx2)
-            iy2 = min(by2, cy2)
+            # Calcul de l'intersection entre les DEUX TORSES
+            ix1 = max(t_ix1, t_jx1)
+            iy1 = max(t_iy1, t_jy1)
+            ix2 = min(t_ix2, t_jx2)
+            iy2 = min(t_iy2, t_jy2)
 
-            # 2. Vérifier s'il y a une vraie intersection mathématique
+            # S'il y a une vraie superposition
             if ix1 < ix2 and iy1 < iy2:
                 inter_area = (ix2 - ix1) * (iy2 - iy1)
                 
-                # 3. Quel pourcentage du joueur est recouvert par l'autre ?
-                ratio_i = inter_area / area_i
-                ratio_j = inter_area / area_j
+                # Quel pourcentage du torse est recouvert ?
+                ratio_i = inter_area / area_i if area_i > 0 else 0
+                ratio_j = inter_area / area_j if area_j > 0 else 0
 
-                # Si l'une des deux BBox est recouverte à plus de 10%, le contact est trop fort
-                # On marque les DEUX joueurs comme occlusés pour les rejeter.
+                # Si l'un des deux torses est recouvert à plus de X% par l'autre
                 if ratio_i > max_overlap_ratio or ratio_j > max_overlap_ratio:
                     is_occluded[i] = True
                     is_occluded[j] = True
 
-    # On retourne uniquement les joueurs sains
+    # On retourne les joueurs certifiés sains
     isolated_players = [raw_players[i] for i in range(n) if not is_occluded[i]]
     return isolated_players
