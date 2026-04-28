@@ -17,8 +17,8 @@ from core.state import MatchState
 
 def check_geometric_crossing(ball_history: list, hoop_bbox: tuple) -> float:
     """
-    Trace une ligne entre la dernière position au-dessus et la première en-dessous.
-    Score 1.0 si la ligne passe au centre du panier, 0.0 si elle rate ou effleure.
+    Trace une ligne UNIQUEMENT si la balle a formellement traversé l'arceau 
+    de haut en bas, en respectant l'ordre chronologique.
     """
     if len(ball_history) < 2 or hoop_bbox is None:
         return 0.0
@@ -30,38 +30,40 @@ def check_geometric_crossing(ball_history: list, hoop_bbox: tuple) -> float:
     p_above = None
     p_below = None
 
-    # 1. Recherche des points pivots (en partant de la fin pour être au plus proche)
+    # On remonte le temps : du présent (fin de liste) vers le passé
     for _, bx, by in reversed(ball_history):
-        if by < hy1 and p_above is None:
-            p_above = (bx, by)
+        
+        # 1. On cherche d'abord la position BASSE (au présent ou passé récent)
         if by > hy2 and p_below is None:
             p_below = (bx, by)
         
-        if p_above and p_below:
-            break
+        # 2. On cherche ensuite la position HAUTE (dans le passé plus lointain)
+        elif by < hy1:
+            if p_below is not None:
+                # OK : On a bien vu la balle en bas, PUIS on la retrouve en haut dans le passé.
+                p_above = (bx, by)
+                break
+            else:
+                # VETO TEMPOREL : La balle est en haut, mais on n'a pas encore vu la descente.
+                # Le tir est donc encore en l'air. On coupe immédiatement.
+                return 0.0
 
     if not p_above or not p_below:
         return 0.0
 
-    # 2. Calcul de l'intersection sur la ligne Y = hy1 (le haut de la boîte)
-    # Formule de l'interpolation linéaire : x = x1 + (x2 - x1) * (y_target - y1) / (y2 - y1)
+    # Interpolation mathématique de l'intersection (inchangée)
     try:
         intersect_x = p_above[0] + (p_below[0] - p_above[0]) * (hy1 - p_above[1]) / (p_below[1] - p_above[1])
     except ZeroDivisionError:
         return 0.0
 
-    # 3. Calcul du score selon la proximité du centre
-    # On regarde la distance entre l'intersection et le centre du panier
     dist_to_center = abs(intersect_x - hoop_center_x)
     max_dist = hoop_width / 2.0
 
     if dist_to_center > max_dist:
-        return 0.0  # La ligne passe en dehors des bords gauche/droite
+        return 0.0 
     
-    # Score linéaire : 1.0 au centre, 0.0 au bord de l'arceau
-    score = 1.0 - (dist_to_center / max_dist)
-    
-    return float(max(0.0, score))
+    return float(max(0.0, 1.0 - (dist_to_center / max_dist)))
 
 # ---------------------------------------------------------------------------
 # 2. VALIDATION PHYSIQUE (SAM2 - Aire du filet)
