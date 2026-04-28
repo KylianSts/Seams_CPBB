@@ -171,11 +171,36 @@ def draw_zones_and_masks(frame: np.ndarray, state: MatchState, margin_ratio: flo
 # 2. BANDEAU SUPÉRIEUR (HUD)
 # ===========================================================================
 
+def draw_sparkline(img: np.ndarray, history: list, x: int, y: int, w: int, h: int, color: tuple):
+    """Dessine un mini-graphique temporel (sparkline) d'un signal."""
+    if len(history) < 2:
+        return
+    
+    # Fond du graphe (semi-transparent sombre) avec bordure
+    cv2.rectangle(img, (x, y), (x + w, y + h), (20, 20, 25), -1)
+    cv2.rectangle(img, (x, y), (x + w, y + h), (60, 60, 70), 1)
+
+    vals = list(history)
+    max_val = max(vals) if max(vals) > 0 else 1.0
+    # On ajoute une marge de 20% pour ne pas que la courbe touche le plafond
+    max_val *= 1.2 
+
+    points = []
+    for i, v in enumerate(vals):
+        px = x + int(i * (w / (len(history) - 1)))
+        # Calcul Y (inversé car 0 est en haut sur l'image)
+        py = y + h - int((v / max_val) * h)
+        points.append((px, py))
+
+    # Dessin de la ligne reliant les points
+    for i in range(len(points) - 1):
+        cv2.line(img, points[i], points[i+1], color, 1, cv2.LINE_AA)
+
 def build_top_hud(total_width: int, state: MatchState) -> np.ndarray:
     """
     Génère le bandeau de debug supérieur en 3 zones :
     Gauche : Indicateurs d'activation (CAM, SAM, AR)
-    Milieu : Métriques de tir (SHOT)
+    Milieu : Métriques de tir (SHOT) + Graphes
     Droite : Détections audio (WHISTLE, CROWD)
     """
     HUD_H = 55
@@ -183,7 +208,14 @@ def build_top_hud(total_width: int, state: MatchState) -> np.ndarray:
     cv2.line(hud, (0, HUD_H - 1), (total_width, HUD_H - 1), (60, 60, 70), 1)
 
     trig = state.active_triggers
-    y = 34  # Ligne de base du texte
+    y = 34  # Ligne de base du texte pour les zones Gauche et Droite
+
+    # --- Paramètres pour la zone du milieu (Graphes) ---
+    y_text = 22     # On remonte le texte pour faire la place au graphe en dessous
+    y_graph = 28    # Position Y du coin haut-gauche du graphe
+    graph_w = 60    # Largeur de la fenêtre du graphe
+    graph_h = 20    # Hauteur de la fenêtre du graphe
+    # -------------------------------------------------------------
 
     def put(img, text, x, color):
         """Écrit du texte et retourne la nouvelle position X (dessin de gauche à droite)."""
@@ -220,22 +252,16 @@ def build_top_hud(total_width: int, state: MatchState) -> np.ndarray:
     # ==========================================
     # 2. MÉTRIQUES DE TIR (Zone Milieu)
     # ==========================================
-    metrics = [
-        ("geometry", "GEOM"),
-        ("net_area", "NET_"),
-        ("optical", "OPTI"),
-    ]
-
     scores = state.shot_scores if state.shot_scores else {}
     
-    # On positionne ce bloc pour qu'il finisse aux 2/3 de l'écran, ce qui le centre très bien
-    cursor_mid = (2 * total_width / 3) + 20 
-    elements_to_draw = []
-
-    for key, short_name in reversed(metrics):
-        val = scores.get(key, 0.0)
-        text = f"{short_name}:{val:.2f}"
+    # On positionne ce bloc pour qu'il finisse aux 2/3 de l'écran (dessin de droite à gauche)
+    cursor_mid = int((2 * total_width / 3) + 20)
+    
+    def put_metric_with_graph(label: str, val: float, history: list):
+        """Helper pour dessiner le texte et le graphe en reculant le curseur."""
+        nonlocal cursor_mid
         
+        # Détermination de la couleur selon le score
         if val == 0.0:
             color = C_OFF
         elif val >= 0.40:
@@ -243,19 +269,39 @@ def build_top_hud(total_width: int, state: MatchState) -> np.ndarray:
         else:
             color = (200, 200, 200)
 
-        tw = cv2.getTextSize(text, FONT_MONO, 0.42, 1)[0][0]
-        cursor_mid -= tw
-        elements_to_draw.append((text, cursor_mid, color))
-        cursor_mid -= 12
+        # On recule le curseur de la largeur de l'élément (graphe de 60px + marge de 15px)
+        cursor_mid -= (graph_w + 15)
+        
+        # Dessin du texte en haut
+        txt = f"{label}:{val:.2f}"
+        cv2.putText(hud, txt, (cursor_mid, y_text), FONT_MONO, 0.40, color, 1, cv2.LINE_AA)
+        
+        # Dessin du graphe en bas
+        if history:
+            draw_sparkline(hud, list(history), cursor_mid, y_graph, graph_w, graph_h, color)
 
-    # Label "SHOT"
+    # --- 1. OPTICAL FLOW (Avec Graphe) ---
+    # getattr permet d'éviter un crash si history n'est pas encore initialisé
+    put_metric_with_graph("OPTI", scores.get("optical", 0.0), getattr(state, 'optical_flow_history', []))
+
+    # --- 2. NET AREA (Avec Graphe) ---
+    put_metric_with_graph("NET_", scores.get("net_area", 0.0), getattr(state, 'net_area_history', []))
+
+    # --- 3. GEOMETRY (Sans Graphe, juste du texte) ---
+    val_geom = scores.get("geometry", 0.0)
+    c_geom = C_OK if val_geom >= 0.40 else (C_OFF if val_geom == 0.0 else (200, 200, 200))
+    txt_geom = f"GEOM:{val_geom:.2f}"
+    
+    tw_geom = cv2.getTextSize(txt_geom, FONT_MONO, 0.40, 1)[0][0]
+    cursor_mid -= (tw_geom + 15)
+    # On le centre verticalement car il n'a pas de graphe en dessous (on utilise 'y' classique)
+    cv2.putText(hud, txt_geom, (cursor_mid, y), FONT_MONO, 0.40, c_geom, 1, cv2.LINE_AA)
+
+    # --- 4. Label Global "SHOT" ---
     shot_label = "SHOT  "
-    tw = cv2.getTextSize(shot_label, FONT_MONO, 0.42, 1)[0][0]
-    cursor_mid -= tw
-    elements_to_draw.append((shot_label, cursor_mid, (240, 240, 240)))
-
-    for text, x_pos, color in elements_to_draw:
-        cv2.putText(hud, text, (int(x_pos), int(y)), FONT_MONO, 0.42, color, 1, cv2.LINE_AA)
+    tw_shot = cv2.getTextSize(shot_label, FONT_MONO, 0.45, 1)[0][0]
+    cursor_mid -= (tw_shot + 15)
+    cv2.putText(hud, shot_label, (cursor_mid, y), FONT_MONO, 0.45, (240, 240, 240), 1, cv2.LINE_AA)
 
     # ==========================================
     # 3. DÉTECTIONS AUDIO (Zone Droite)

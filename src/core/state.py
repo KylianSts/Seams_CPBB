@@ -68,12 +68,12 @@ class MatchState:
     ball_history: deque = field(default_factory=lambda: deque(maxlen=40))
 
     # Fenêtre courte : on compare l'aire actuelle à la moyenne récente
-    net_area_history: deque = field(default_factory=lambda: deque(maxlen=10))
+    net_area_history: deque = field(default_factory=lambda: deque(maxlen=40))
 
     # Frame précédente en BGR pour get_hoop_optical_flow
     prev_frame_bgr: Optional[np.ndarray] = None
 
-    optical_flow_history: deque = field(default_factory=lambda: deque(maxlen=15))
+    optical_flow_history: deque = field(default_factory=lambda: deque(maxlen=40))
 
     # ===========================================================================
     # 4. KEYPOINTS DU TERRAIN (YOLO-Pose)
