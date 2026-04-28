@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from core.state import MatchState, PlayerState
-from core.filters import apply_ema_2d
+from core.filters import OneEuroFilter
 from core.track_supervisor import TrackSupervisor
 from boxmot.trackers.botsort.botsort import BotSort
 
@@ -88,8 +88,9 @@ def update_players_tracking(
     player_detections: List[Tuple[float, float, float, float, float]],
     frame: np.ndarray,
     state: MatchState,
-    team_detector = None,       # NOUVEAU : Référence au modèle GMM
-    supervisor = None,          # NOUVEAU : Instance du TrackSupervisor
+    current_t: float,
+    team_detector = None,       # Référence au modèle GMM
+    supervisor = None,          # Instance du TrackSupervisor
     max_lost_frames: int = 20   # ~200ms à 30fps
 ) -> MatchState:
     """
@@ -111,7 +112,7 @@ def update_players_tracking(
     tracked_objects = tracker.update(dets_array, frame)
 
     # =======================================================================
-    # NOUVEAU : SUPERVISION (Le Veto GMM)
+    # SUPERVISION (Le Veto GMM)
     # On filtre les résultats de BotSort avant de les injecter dans le State
     # =======================================================================
     if supervisor is not None and team_detector is not None and tracked_objects is not None:
@@ -141,23 +142,21 @@ def update_players_tracking(
                 old_history = state.players[track_id].pos_history_m
                 old_speed = state.players[track_id].speed_kmh
                 old_court_pos = state.players[track_id].court_pos_m 
+                player_filter = state.players[track_id].pos_filter # NOUVEAU
             else:
                 old_history = deque(maxlen=30)
                 old_speed = 0.0
                 old_court_pos = None 
+                # Paramètres à tuner : mincutoff bas = lisse à l'arrêt, beta haut = réactif en sprint
+                player_filter = OneEuroFilter(mincutoff=0.20, beta=0.50) 
             # ------------------------------------------------
 
-            # --- LISSAGE EMA (Exponential Moving Average) ---
+            # --- LISSAGE 1 EURO (Remplace l'EMA) ---
             if raw_court_pos is not None:
-                if old_court_pos is not None:
-                    # Formule du lissage
-                    ALPHA = 0.30  
-                    smooth_x = (ALPHA * raw_court_pos[0]) + ((1.0 - ALPHA) * old_court_pos[0])
-                    smooth_y = (ALPHA * raw_court_pos[1]) + ((1.0 - ALPHA) * old_court_pos[1])
-                    final_court_pos = (smooth_x, smooth_y)
-                else:
-                    # Première frame où on voit le joueur : pas de lissage possible
-                    final_court_pos = raw_court_pos
+                # Le filtre attend un numpy array
+                raw_pos_array = np.array(raw_court_pos, dtype=np.float32)
+                smoothed_pos = player_filter(current_t, raw_pos_array)
+                final_court_pos = (float(smoothed_pos[0]), float(smoothed_pos[1]))
             else:
                 final_court_pos = None
             # ------------------------------------------------
@@ -168,7 +167,8 @@ def update_players_tracking(
                 foot_pos_px=(foot_x, foot_y),
                 court_pos_m=final_court_pos,
                 pos_history_m=old_history,  
-                speed_kmh=old_speed         
+                speed_kmh=old_speed,
+                pos_filter=player_filter    # NOUVEAU : On sauvegarde le filtre
             )
 
             new_players_dict[track_id] = player
