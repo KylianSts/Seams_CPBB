@@ -164,3 +164,52 @@ class OneEuroFilterVectorized:
         out = x_hat.copy()
         out[~valid_mask] = 0.0
         return out
+    
+def filter_isolated_players(raw_players: list, max_overlap_ratio: float = 0.10) -> list:
+    """
+    Conserve uniquement les joueurs "isolés".
+    Tolère une légère superposition (ex: 10% de l'aire de la BBox) pour ne pas 
+    perdre de données sur des contacts mineurs.
+    """
+    n = len(raw_players)
+    if n == 0:
+        return []
+
+    is_occluded = [False] * n
+
+    for i in range(n):
+        if is_occluded[i]: 
+            continue
+
+        bx1, by1, bx2, by2, conf = raw_players[i]
+        # Calcul de l'aire totale du joueur A
+        area_i = (bx2 - bx1) * (by2 - by1)
+
+        for j in range(i + 1, n):
+            cx1, cy1, cx2, cy2, conf2 = raw_players[j]
+            # Calcul de l'aire totale du joueur B
+            area_j = (cx2 - cx1) * (cy2 - cy1)
+
+            # 1. Calcul des coordonnées du rectangle d'intersection
+            ix1 = max(bx1, cx1)
+            iy1 = max(by1, cy1)
+            ix2 = min(bx2, cx2)
+            iy2 = min(by2, cy2)
+
+            # 2. Vérifier s'il y a une vraie intersection mathématique
+            if ix1 < ix2 and iy1 < iy2:
+                inter_area = (ix2 - ix1) * (iy2 - iy1)
+                
+                # 3. Quel pourcentage du joueur est recouvert par l'autre ?
+                ratio_i = inter_area / area_i
+                ratio_j = inter_area / area_j
+
+                # Si l'une des deux BBox est recouverte à plus de 10%, le contact est trop fort
+                # On marque les DEUX joueurs comme occlusés pour les rejeter.
+                if ratio_i > max_overlap_ratio or ratio_j > max_overlap_ratio:
+                    is_occluded[i] = True
+                    is_occluded[j] = True
+
+    # On retourne uniquement les joueurs sains
+    isolated_players = [raw_players[i] for i in range(n) if not is_occluded[i]]
+    return isolated_players
