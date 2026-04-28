@@ -391,6 +391,7 @@ def process_video(
                 filtered_players,
                 frame,
                 state,
+                current_t=current_t,
                 team_detector=team_detector,
                 supervisor=supervisor
             )
