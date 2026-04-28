@@ -20,19 +20,16 @@ logger = logging.getLogger(__name__)
 
 
 class TeamDetector:
-    def __init__(self, calibration_frames: int = 45, calibration_stride: int = 5, history_size: int = 30):
+    def __init__(self, calibration_frames: int = 100, history_size: int = 30):
         """
         Args:
-            calibration_frames: Nombre total d'images à capturer pour le GMM.
-            calibration_stride: On capture 1 frame sur N pour avoir plus de diversité temporelle.
-            history_size: Nombre de frames mémorisées par joueur pour le vote majoritaire.
+            calibration_frames: Nombre d'échantillons cibles pour le GMM.
+            history_size: Nombre de frames mémorisées par joueur pour le vote.
         """
         self.calibration_frames = calibration_frames
-        self.calibration_stride = calibration_stride
         self.history_size = history_size
         
         self.is_calibrated = False
-        self.frames_seen = 0
         self.frames_collected = 0
         self.histograms_buffer = [] 
         
@@ -71,15 +68,11 @@ class TeamDetector:
         return hist.flatten()
 
 
-    def collect_from_raw_boxes(self, frame: np.ndarray, boxes: List[Tuple]) -> None:
-        """Utilitaire pour la phase de Pre-flight."""
+    def collect_from_raw_boxes(self, frame: np.ndarray, isolated_boxes: List[Tuple]) -> None:
+        """Extrait les histogrammes à partir d'une liste de joueurs préalablement filtrés (isolés)."""
         if self.is_calibrated: return
-        
-        self.frames_seen += 1
-        if self.frames_seen % self.calibration_stride != 0:
-            return # On ignore cette frame (Stride)
             
-        for box in boxes:
+        for box in isolated_boxes:
             hist = self._get_torso_histogram(frame, box[:4])
             if hist is not None:
                 self.histograms_buffer.append(hist)
