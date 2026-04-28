@@ -50,13 +50,13 @@ from core.detect_shots import (
     check_ball_occlusion,
     check_ball_velocity_profile,
 )
-from core.detect_audio import AudioConfig, get_match_audio_events
+from core.detect_audio import YamnetConfig, get_match_audio_events
 from core.incrust_logo import LogoConfig, load_ar_assets, apply_virtual_logo
 from core.spatial_triggers import is_ball_near_hoop, get_players_in_ar_zone, is_camera_stable, is_ball_falling
 from core.render import render_debug_frame
 from core.metrics import compute_kinematics
 from core.detect_team import TeamDetector
-from core.filters import filter_top_10_players, filter_best_ball, OneEuroFilterVectorized
+from core.filters import filter_top_10_players, filter_best_ball, OneEuroFilterVectorized, filter_isolated_players
 from core.track_supervisor import TrackSupervisor
 
 # ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ MASK_METHOD = "capsule"
 COURT_L, COURT_W = 28.0, 15.0
 
 # --- Position des deux logos sur le terrain (symétrie) ---
-_CX, _CY, _SIZE = 2.285, 12.0, 2.50
+_CX, _CY, _SIZE = 2.285, 12.0, 3.0
 _HALF = _SIZE / 2.0
 
 LOGO_CORNERS_LEFT = np.array([
@@ -97,7 +97,7 @@ HOOP_CALIB_MIN_SAMPLES = 30
 
 # --- Cooldown entre deux tirs validés ---
 SHOT_COOLDOWN_FRAMES = 45       # ~1.5 sec à 30fps
-BALL_LOST_TIMEOUT_FRAMES = 90   # ~3.0 sec à 30fps
+BALL_LOST_TIMEOUT_FRAMES = 45   # ~1.5 sec à 30fps
 
 # --- Seuil de confiance pour valider un tir (moyenne des scores) ---
 SHOT_CONFIDENCE_THRESHOLD = 0.4
@@ -170,7 +170,7 @@ def process_video(
     video_path: Path,
     output_path: Path,
     device: int = 0,
-    enable_audio: bool = True,
+    enable_audio: bool = False,
     enable_ar: bool = True,
     enable_sam: bool = True,
     enable_supervisor: bool = False,
@@ -233,7 +233,7 @@ def process_video(
     audio_events = []
     if enable_audio:
         logger.info("Analyse audio (pre-processing)...")
-        audio_events = get_match_audio_events(video_path, AudioConfig())
+        audio_events = get_match_audio_events(video_path, YamnetConfig())
         logger.info(f"  → {len(audio_events)} sifflet(s) détecté(s).")
 
     # --- Ouverture de la vidéo source ---
@@ -265,7 +265,7 @@ def process_video(
 
     # Initialisation du filtre 1 Euro pour la caméra
     # mincutoff=0.01 (lissage fort au repos) | beta=0.50 (réactivité rapide en mouvement)
-    state.camera.kp_filter = OneEuroFilterVectorized(mincutoff=0.01, beta=0.0)
+    state.camera.kp_filter = OneEuroFilterVectorized(mincutoff=0.2, beta=0.5)
 
     # --- Variables de contrôle inter-frames ---
     prev_hoop_bbox      = None    # Dernière bbox panier connue (pour is_camera_stable)
@@ -279,23 +279,36 @@ def process_video(
     # =======================================================================
 
     # =======================================================================
-    # PRE-FLIGHT : Calibration des équipes
+    # PRE-FLIGHT : Calibration des équipes (Optimisé V2)
     # =======================================================================
-    team_detector = TeamDetector(calibration_frames=270, history_size=75, calibration_stride=3)
-    logger.info("Pre-flight : Apprentissage des couleurs d'équipes...")
+    SAMPLES_NEEDED = 500 # On vise 100 frames réparties sur tout le match
+    team_detector = TeamDetector(calibration_frames=SAMPLES_NEEDED, history_size=75)
     
-    for _ in range(team_detector.calibration_frames):
+    # Calcul du saut en nombre de frames
+    stride = max(1, total // SAMPLES_NEEDED)
+    
+    logger.info(f"Pre-flight : Échantillonnage de {SAMPLES_NEEDED} frames (1 frame toutes les {stride} frames)...")
+    
+    for i in tqdm(range(0, total, stride), desc="Calibration GMM"):
+        # On saute directement à la frame ciblée
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ret, pf_frame = cap.read()
         if not ret: break
         
-        # On fait juste tourner le détecteur d'objets (ultra rapide)
+        # 1. Détection des objets sur cette frame isolée
         det_res = run_object_detection(det_model, pf_frame, det_config)
-        team_detector.collect_from_raw_boxes(pf_frame, det_res.players)
+        
+        # 2. On filtre pour ne garder que les joueurs isolés (tolérance de 10% d'occlusion)
+        # Note: on n'utilise que det_res.players, les arbitres sont naturellement ignorés
+        isolated_players = filter_isolated_players(det_res.players, max_overlap_ratio=0.10)
+        
+        # 3. On extrait les couleurs de ces joueurs parfaits
+        team_detector.collect_from_raw_boxes(pf_frame, isolated_players)
 
-    # On force la calibration
+    # On force l'entraînement du modèle avec les données collectées
     team_detector._run_calibration()
     
-    # ON REMBOBINE LA VIDÉO À LA FRAME 0 !
+    # ON REMBOBINE LA VIDÉO À LA FRAME 0 POUR LE VRAI TRAITEMENT
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     with tqdm(total=total, unit="frame", desc="Pipeline V2") as pbar:
@@ -339,7 +352,7 @@ def process_video(
 
             # Calcul de la stabilité (basé sur le panier)
             cam_stable_strict = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_px=5.0)
-            cam_stable_ar = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_px=50.0)
+            cam_stable_ar = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_px=15.0)
             
             state.camera.is_stable = cam_stable_strict
 
@@ -662,46 +675,65 @@ def process_video(
 
             pbar.update(1)
 
-    # =======================================================================
+# =======================================================================
     # FIN
     # =======================================================================
     cap.release()
-    writer.release()
+    if writer is not None:
+        writer.release()
+    cv2.destroyAllWindows()  # Sécurité : ferme bien toutes les fenêtres d'OpenCV
 
     # --- AJOUT DE L'AUDIO (Muxing avec FFmpeg) ---
     if enable_audio:
         logger.info("Fusion de la piste audio d'origine avec la vidéo annotée...")
         
-        # On renomme temporairement le fichier muet qu'on vient de créer
+        # On crée le nom du fichier temporaire
         temp_video = output_path.with_name(f"temp_muet_{output_path.name}")
+        
+        # CRUCIAL (Surtout sur Windows) : On supprime le fichier temp s'il existait déjà 
+        # pour éviter le crash de la fonction rename()
+        if temp_video.exists():
+            temp_video.unlink()
+            
+        # On renomme le fichier muet généré par OpenCV
         output_path.rename(temp_video)
         
-        # Commande FFmpeg pour coller la vidéo muette et l'audio source
+        import subprocess
+        # Commande FFmpeg ultra-robuste avec conversion H.264 universelle
         cmd = [
             "ffmpeg", "-y",
             "-i", str(temp_video),         # Input 0: Vidéo annotée muette
             "-i", str(video_path),         # Input 1: Vidéo source originale
-            "-c:v", "copy",                # Copie l'image sans re-compresser (Ultra rapide)
-            "-c:a", "aac",                 # Encode/Copie l'audio
+            
+            # --- LES 3 LIGNES MAGIQUES QUI RÉGLENT TON PROBLÈME ---
+            "-c:v", "libx264",             # Convertit la vidéo au standard universel H.264
+            "-preset", "fast",             # Accélère la conversion
+            "-pix_fmt", "yuv420p",         # Format de pixels obligatoire pour que Windows/QuickTime puisse lire la vidéo
+            # ------------------------------------------------------
+            
             "-map", "0:v:0",               # Garde le flux vidéo de l'input 0
-            "-map", "1:a:0",               # Garde le flux audio de l'input 1
-            "-shortest",                   # Coupe à la fin de la vidéo
+            "-map", "1:a:0?",              # Le '?' évite le crash si la source n'a pas d'audio standard
+            "-c:a", "aac",                 # Force un format audio universel et lisible partout
+            "-shortest",                   # Coupe proprement à la fin de la vidéo
             "-loglevel", "error",
             str(output_path)               # Fichier final
         ]
         
-        # Exécution de la commande
-        result = subprocess.run(cmd)
+        # Exécution de la commande avec capture d'erreurs
+        result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode == 0:
             logger.info("Audio ajouté avec succès !")
-            # On nettoie le fichier temporaire
+            # On nettoie le fichier temporaire car tout s'est bien passé
             if temp_video.exists():
                 temp_video.unlink()
         else:
-            logger.error("Échec de l'ajout audio via FFmpeg. La vidéo muette est conservée.")
-            temp_video.rename(output_path) # Restauration en cas d'erreur
-            
+            logger.error(f"Échec de l'ajout audio via FFmpeg. Erreur : {result.stderr}")
+            logger.warning("Restauration de la vidéo muette.")
+            # Restauration propre en cas de crash de FFmpeg (replace gère l'écrasement sur Windows)
+            if temp_video.exists():
+                temp_video.replace(output_path)
+                
     logger.info(f"Vidéo de sortie sauvegardée : {output_path}")
 
 
@@ -712,7 +744,7 @@ def process_video(
 
 if __name__ == "__main__":
 
-    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
+    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/nantes_long.mp4")
     OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
 
     parser = argparse.ArgumentParser(
