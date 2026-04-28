@@ -84,29 +84,9 @@ def check_net_area_variation(current_net_mask: np.ndarray, net_area_history: Lis
     # On retourne la variation positive (gonflement du filet)
     return max(0.0, variation)
 
-# ---------------------------------------------------------------------------
-# 3. VALIDATION MORPHOLOGIQUE (Déformation de la BBox)
-# ---------------------------------------------------------------------------
-
-def check_hoop_deformation(current_hoop_bbox: Tuple[float, float, float, float], hoop_ref_dims: Tuple[float, float]) -> Tuple[float, float]:
-    """
-    Regarde si la Bounding Box du panier s'étire (souvent vers le bas lors d'un swish).
-    Retourne (variation_largeur, variation_hauteur).
-    """
-    if current_hoop_bbox is None or hoop_ref_dims is None:
-        return 0.0, 0.0
-
-    x1, y1, x2, y2 = current_hoop_bbox
-    w, h = x2 - x1, y2 - y1
-    ref_w, ref_h = hoop_ref_dims
-
-    v_w = (w - ref_w) / ref_w
-    v_h = (h - ref_h) / ref_h
-    
-    return v_w, v_h
 
 # ---------------------------------------------------------------------------
-# 4. VALIDATION PAR FLUX OPTIQUE (Mouvement interne)
+# 3. VALIDATION PAR FLUX OPTIQUE (Mouvement interne)
 # ---------------------------------------------------------------------------
 
 def get_hoop_optical_flow(prev_frame: np.ndarray, curr_frame: np.ndarray, hoop_bbox: Tuple[float, float, float, float]) -> float:
@@ -135,73 +115,3 @@ def get_hoop_optical_flow(prev_frame: np.ndarray, curr_frame: np.ndarray, hoop_b
     # On calcule la magnitude moyenne du mouvement
     mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
     return float(np.mean(mag))
-
-# ---------------------------------------------------------------------------
-# 5. VALIDATION D'OCCLUSION (Indice de pénétration)
-# ---------------------------------------------------------------------------
-
-def check_ball_occlusion(ball_detected: bool, last_ball_pos: Tuple[float, float], hoop_bbox: Tuple[float, float, float, float]) -> float:
-    """
-    Si la balle n'est plus détectée alors qu'elle était juste au-dessus du panier,
-    c'est un fort indice qu'elle est à l'intérieur du filet.
-    """
-    if ball_detected: return 0.0
-    if last_ball_pos is None or hoop_bbox is None: return 0.0
-    
-    # Si la dernière position connue était dans la moitié haute du panier
-    hx1, hy1, hx2, hy2 = hoop_bbox
-    lx, ly = last_ball_pos
-    
-    if (hx1 <= lx <= hx2) and (hy1 <= ly <= hy1 + (hy2-hy1)*0.5):
-        return 1.0 # Probabilité maximale d'entrée dans le filet
-        
-    return 0.0
-
-
-def check_ball_velocity_profile(ball_history: List[Tuple[int, float, float]], hoop_bbox: Tuple[float, float, float, float], fps: float = 30.0) -> float:
-    """
-    Analyse la signature de décélération de la balle lors de son passage dans l'arceau.
-    Un panier réussi présente une courbe de ralentissement progressive (friction du filet).
-    """
-    if len(ball_history) < 6 or hoop_bbox is None:
-        return 0.0
-
-    hx1, hy1, hx2, hy2 = hoop_bbox
-    
-    # 1. Extraction des vitesses verticales (Vy) sur les dernières frames
-    # Vy = (y_actuel - y_precedent)
-    vy_list = []
-    for i in range(1, len(ball_history)):
-        vy = ball_history[i][2] - ball_history[i-1][2]
-        vy_list.append(vy)
-
-    # 2. On isole la phase où la balle est "dans" ou "sous" l'arceau
-    # On cherche une décélération (Vy qui diminue) alors que la balle tombe (Vy > 0)
-    decelerations = []
-    for i in range(1, len(vy_list)):
-        accel = vy_list[i] - vy_list[i-1]
-        
-        # Si la balle est dans la zone du panier
-        curr_y = ball_history[i][2]
-        if hy1 < curr_y < hy2:
-            decelerations.append(accel)
-
-    if not decelerations:
-        return 0.0
-
-    # 3. Analyse du profil
-    # Un swish = décélération constante et modérée (la balle freine dans les mailles)
-    # Un choc (arceau) = décélération énorme et instantanée
-    # Un airball = accélération positive (pesanteur)
-    
-    avg_accel = sum(decelerations) / len(decelerations)
-    
-    # Score 1.0 si on observe un freinage fluide (avg_accel est négatif)
-    # On calibre : une petite décélération constante est idéale.
-    if avg_accel < 0:
-        # Plus c'est fluide et constant, plus le score est haut
-        # On évite les chocs trop violents (rebonds)
-        score = min(1.0, abs(avg_accel) / 5.0) 
-        return float(score)
-    
-    return 0.0

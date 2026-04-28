@@ -223,10 +223,7 @@ def build_top_hud(total_width: int, state: MatchState) -> np.ndarray:
     metrics = [
         ("geometry", "GEOM"),
         ("net_area", "NET_"),
-        ("deform", "DEFO"),
         ("optical", "OPTI"),
-        ("occlusion", "OCCL"),
-        ("velocity", "VELO")
     ]
 
     scores = state.shot_scores if state.shot_scores else {}
@@ -587,7 +584,7 @@ def render_debug_frame(frame: np.ndarray, state: MatchState, sidebar_w: int, mar
 
     # 1. Préparation de la vidéo annotée
     main = draw_zones_and_masks(frame, state, margin_ratio, mask_palyer=False, mask_net=True)
-    main = draw_detections(main, state, txt_hoop=False, txt_player=True, show_team_crop=False)
+    main = draw_detections(main, state, txt_hoop=False, txt_player=True, show_team_crop=True)
 
     # 2. Création du HUD
     hud = build_top_hud(w, state)

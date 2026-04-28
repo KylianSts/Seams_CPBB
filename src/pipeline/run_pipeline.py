@@ -42,14 +42,7 @@ from core.detect_objects import DetectionConfig, load_object_detector, run_objec
 from core.detect_court import CourtPoseConfig, load_court_detector, run_court_detection, compute_homography, smooth_homography
 from core.tracking import load_tracker, update_players_tracking
 from core.segmentation import SegmentationConfig, load_segmentation_model, encode_frame, get_players_masks, get_net_mask
-from core.detect_shots import (
-    check_geometric_crossing,
-    check_net_area_variation,
-    check_hoop_deformation,
-    get_hoop_optical_flow,
-    check_ball_occlusion,
-    check_ball_velocity_profile,
-)
+from core.detect_shots import check_geometric_crossing, check_net_area_variation, get_hoop_optical_flow
 from core.detect_audio import YamnetConfig, get_match_audio_events
 from core.incrust_logo import LogoConfig, load_ar_assets, apply_virtual_logo
 from core.spatial_triggers import is_ball_near_hoop, get_players_in_ar_zone, is_camera_stable, is_ball_falling
@@ -92,9 +85,6 @@ LOGO_CORNERS_RIGHT = np.array([
 ], dtype=np.float32)
 
 # --- Calibration du panier ---
-# Nombre de frames stables (balle loin + cam stable) avant de figer la référence
-HOOP_CALIB_MIN_SAMPLES = 30
-
 # --- Cooldown entre deux tirs validés ---
 SHOT_COOLDOWN_FRAMES = 45       # ~1.5 sec à 30fps
 BALL_LOST_TIMEOUT_FRAMES = 45   # ~1.5 sec à 30fps
@@ -174,7 +164,7 @@ def process_video(
     enable_ar: bool = True,
     enable_sam: bool = True,
     enable_supervisor: bool = False,
-    enable_h_smooth: bool = True,
+    enable_h_smooth: bool = False,
 ) -> None:
 
     # =======================================================================
@@ -416,28 +406,6 @@ def process_video(
             compute_kinematics(state, fps)
 
             # ---------------------------------------------------------------
-            # ÉTAPE 4.5 — Calibration de référence du panier
-            # Conditions : caméra stable ET balle loin du panier
-            # ---------------------------------------------------------------
-            if (
-                state.hoop_bbox_px is not None
-                and state.camera.is_stable
-                and not is_ball_near_hoop(state.ball_bbox_px, state.hoop_bbox_px)
-                and not state.is_hoop_calibrated
-            ):
-                hx1, hy1, hx2, hy2 = state.hoop_bbox_px
-                state.hoop_dims_history.append((hx2 - hx1, hy2 - hy1))
-
-                if len(state.hoop_dims_history) >= HOOP_CALIB_MIN_SAMPLES:
-                    state.hoop_ref_w = float(np.mean([d[0] for d in state.hoop_dims_history]))
-                    state.hoop_ref_h = float(np.mean([d[1] for d in state.hoop_dims_history]))
-                    state.is_hoop_calibrated = True
-                    logger.info(
-                        f"Panier calibré : ref = "
-                        f"{state.hoop_ref_w:.1f}px × {state.hoop_ref_h:.1f}px"
-                    )
-
-            # ---------------------------------------------------------------
             # ÉTAPE 5 — Calcul des triggers spatiaux
             # ---------------------------------------------------------------
 
@@ -565,21 +533,14 @@ def process_video(
                     if logo_cfg is not None:
                         frame = apply_virtual_logo(frame, state, logo_cfg)
 
-            # ---------------------------------------------------------------
-            # ÉTAPE 8 — Détection de tir (6 métriques)
-            # Calculées uniquement quand la balle est près du panier.
+           # ---------------------------------------------------------------
+            # ÉTAPE 8 — Détection de tir (3 Métriques Robustes)
             # ---------------------------------------------------------------
             if ball_near and state.hoop_bbox_px is not None:
 
-                ball_detected  = state.ball_bbox_px is not None
-                last_ball_pos  = None
-                if ball_detected:
-                    bx1, by1, bx2, by2 = state.ball_bbox_px
-                    last_ball_pos = ((bx1 + bx2) / 2.0, (by1 + by2) / 2.0)
-
                 scores = {}
 
-                # 1. Traversée géométrique de l'arceau
+                # 1. Traversée géométrique de l'arceau (Le Gatekeeper)
                 scores["geometry"] = check_geometric_crossing(
                     list(state.ball_history), state.hoop_bbox_px
                 )
@@ -589,49 +550,33 @@ def process_video(
                     state.net_mask, list(state.net_area_history)
                 )
 
-                # 3. Déformation de la bbox du panier (étirement vertical)
-                if state.is_hoop_calibrated:
-                    _, v_h = check_hoop_deformation(
-                        state.hoop_bbox_px,
-                        (state.hoop_ref_w, state.hoop_ref_h)
-                    )
-                    scores["deform"] = float(max(0.0, v_h))
-                else:
-                    scores["deform"] = 0.0
-
-                # 4. Flux optique dans la zone du panier
+                # 3. Flux optique dans la zone du panier
                 scores["optical"] = get_hoop_optical_flow(
                     state.prev_frame_bgr, frame, state.hoop_bbox_px
                 )
 
-                # 5. Occlusion : balle disparaît dans le filet
-                scores["occlusion"] = check_ball_occlusion(
-                    ball_detected, last_ball_pos, state.hoop_bbox_px
-                )
-
-                # 6. Profil de vélocité (décélération dans le filet)
-                scores["velocity"] = check_ball_velocity_profile(
-                    list(state.ball_history), state.hoop_bbox_px, fps
-                )
-
                 state.shot_scores = scores
 
-                # --- Validation du tir ---
-                # Score de confiance = moyenne des métriques actives (> 0)
-                active_scores = [v for v in scores.values() if v > 0.0]
-                if active_scores:
-                    confidence = float(np.mean(active_scores))
-                    cooldown_ok = (
-                        state.frame_idx - last_shot_frame
-                    ) >= SHOT_COOLDOWN_FRAMES
+                # --- Validation du tir (Logique Veto + Poids) ---
+                # Règle 1 : La balle DOIT géométriquement croiser l'arceau
+                if scores["geometry"] > 0.1:
+                    
+                    # Règle 2 : Pondération des signaux physiques
+                    # SAM est très fiable (poids fort), le flux optique est un bonus (poids faible)
+                    physical_score = (scores["net_area"] * 0.70) + (scores["optical"] * 0.30)
+                    
+                    # Si on détecte une déformation physique suffisante
+                    if physical_score >= SHOT_CONFIDENCE_THRESHOLD:
+                        
+                        cooldown_ok = (state.frame_idx - last_shot_frame) >= SHOT_COOLDOWN_FRAMES
 
-                    if confidence >= SHOT_CONFIDENCE_THRESHOLD and cooldown_ok:
-                        state.events.append("SHOT_DETECTED")
-                        last_shot_frame = state.frame_idx
-                        logger.info(
-                            f"  [TIR DÉTECTÉ] Frame {state.frame_idx} "
-                            f"| Confiance : {confidence:.2f}"
-                        )
+                        if cooldown_ok:
+                            state.events.append("SHOT_DETECTED")
+                            last_shot_frame = state.frame_idx
+                            logger.info(
+                                f"  [TIR DÉTECTÉ] Frame {state.frame_idx} "
+                                f"| Geom: {scores['geometry']:.2f} | Phys: {physical_score:.2f}"
+                            )
 
             # ---------------------------------------------------------------
             # ÉTAPE 9 — Mise à jour de l'historique de la balle

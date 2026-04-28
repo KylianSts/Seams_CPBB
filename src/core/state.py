@@ -74,14 +74,6 @@ class MatchState:
     prev_frame_bgr: Optional[np.ndarray] = None
 
     # ===========================================================================
-    # 3. CALIBRATION DU PANIER (Pour check_hoop_deformation)
-    # ===========================================================================
-    hoop_dims_history: list = field(default_factory=list)
-    is_hoop_calibrated: bool = False
-    hoop_ref_w: Optional[float] = None
-    hoop_ref_h: Optional[float] = None
-
-    # ===========================================================================
     # 4. KEYPOINTS DU TERRAIN (YOLO-Pose)
     # ===========================================================================
     court_keypoints_px: Optional[np.ndarray] = None    # Tableau (N, 2)
