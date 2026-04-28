@@ -80,17 +80,12 @@ def apply_ema_2d(current_pos: Tuple[float, float],
     
     return (smooth_x, smooth_y)
 
-class OneEuroFilterVectorized:
-    """
-    Filtre 1 Euro optimisé pour Numpy.
-    Traite un tableau (N, 2) de coordonnées simultanément.
-    Gère les points (0, 0) issus des non-détections de YOLO-Pose.
-    """
+class OneEuroFilter:
+    """Filtre 1 Euro pour un seul point 2D (utilisé pour un joueur)."""
     def __init__(self, mincutoff=1.0, beta=0.0, dcutoff=1.0):
-        self.mincutoff = mincutoff  # Lissage au repos (plus c'est bas, plus ça lisse)
-        self.beta = beta            # Réactivité (plus c'est haut, plus ça réduit le lissage en mouvement)
-        self.dcutoff = dcutoff      # Lissage de la vitesse
-        
+        self.mincutoff = mincutoff
+        self.beta = beta
+        self.dcutoff = dcutoff
         self.x_prev = None
         self.dx_prev = None
         self.t_prev = None
@@ -100,14 +95,6 @@ class OneEuroFilterVectorized:
         return r / (r + 1)
 
     def __call__(self, t: float, x: np.ndarray) -> np.ndarray:
-        """
-        Applique le filtre.
-        t : timestamp courant en secondes.
-        x : np.ndarray de shape (N, 2) contenant les points bruts.
-        """
-        # Masque pour ignorer les points que YOLO n'a pas trouvés (0.0, 0.0)
-        valid_mask = (x[:, 0] > 0) & (x[:, 1] > 0)
-        
         if self.t_prev is None:
             self.x_prev = x.copy()
             self.dx_prev = np.zeros_like(x)
@@ -118,52 +105,22 @@ class OneEuroFilterVectorized:
         if t_e <= 0:
             return self.x_prev
 
-        # Tableaux de travail
-        x_hat = self.x_prev.copy()
-        dx_hat = self.dx_prev.copy()
-        
-        if np.any(valid_mask):
-            # Extraction des sous-matrices valides
-            x_v = x[valid_mask]
-            xp_v = self.x_prev[valid_mask]
-            dxp_v = self.dx_prev[valid_mask]
-            
-            # Lissage de la dérivée (vitesse)
-            a_d = self.smoothing_factor(t_e, self.dcutoff)
-            dx_v = (x_v - xp_v) / t_e
-            dx_hat_v = a_d * dx_v + (1 - a_d) * dxp_v
-            
-            # Calcul de la fréquence de coupure dynamique (basée sur la vitesse)
-            speed = np.linalg.norm(dx_hat_v, axis=1, keepdims=True)
-            cutoff = self.mincutoff + self.beta * speed
-            
-            # Lissage de la position
-            r = 2 * math.pi * cutoff * t_e
-            a_k = r / (r + 1)
-            x_hat_v = a_k * x_v + (1 - a_k) * xp_v
-            
-            # Réintégration
-            x_hat[valid_mask] = x_hat_v
-            dx_hat[valid_mask] = dx_hat_v
+        # Lissage de la vitesse
+        a_d = self.smoothing_factor(t_e, self.dcutoff)
+        dx = (x - self.x_prev) / t_e
+        dx_hat = a_d * dx + (1 - a_d) * self.dx_prev
 
-        # Sécurité : Si un point redevient valide après avoir été à (0,0), on reset son état
-        zero_prev_mask = (self.x_prev[:, 0] == 0) & (self.x_prev[:, 1] == 0)
-        reset_mask = valid_mask & zero_prev_mask
-        
-        if np.any(reset_mask):
-            x_hat[reset_mask] = x[reset_mask]
-            dx_hat[reset_mask] = 0.0
+        # Lissage de la position
+        speed = np.linalg.norm(dx_hat)
+        cutoff = self.mincutoff + self.beta * speed
+        a_k = self.smoothing_factor(t_e, cutoff)
+        x_hat = a_k * x + (1 - a_k) * self.x_prev
 
-        # Mise à jour de la mémoire interne
-        self.x_prev = x_hat.copy()
-        self.dx_prev = dx_hat.copy()
+        self.x_prev = x_hat
+        self.dx_prev = dx_hat
         self.t_prev = t
-        
-        # On force les points invalides actuels à (0,0) dans la sortie
-        # pour que compute_homography les ignore correctement
-        out = x_hat.copy()
-        out[~valid_mask] = 0.0
-        return out
+
+        return x_hat
     
 def filter_isolated_players(raw_players: list, max_overlap_ratio: float = 0.10) -> list:
     """
