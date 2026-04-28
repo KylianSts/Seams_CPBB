@@ -73,6 +73,8 @@ class MatchState:
     # Frame précédente en BGR pour get_hoop_optical_flow
     prev_frame_bgr: Optional[np.ndarray] = None
 
+    optical_flow_history: deque = field(default_factory=lambda: deque(maxlen=15))
+
     # ===========================================================================
     # 4. KEYPOINTS DU TERRAIN (YOLO-Pose)
     # ===========================================================================

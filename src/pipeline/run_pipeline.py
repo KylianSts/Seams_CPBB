@@ -42,14 +42,14 @@ from core.detect_objects import DetectionConfig, load_object_detector, run_objec
 from core.detect_court import CourtPoseConfig, load_court_detector, run_court_detection, compute_homography, smooth_homography
 from core.tracking import load_tracker, update_players_tracking
 from core.segmentation import SegmentationConfig, load_segmentation_model, encode_frame, get_players_masks, get_net_mask
-from core.detect_shots import check_geometric_crossing, check_net_area_variation, get_hoop_optical_flow
+from core.detect_shots import check_geometric_crossing, check_net_area_variation, get_hoop_optical_flow, check_optical_flow_signature
 from core.detect_audio import YamnetConfig, get_match_audio_events
 from core.incrust_logo import LogoConfig, load_ar_assets, apply_virtual_logo
 from core.spatial_triggers import is_ball_near_hoop, get_players_in_ar_zone, is_camera_stable, is_ball_falling
 from core.render import render_debug_frame
 from core.metrics import compute_kinematics
 from core.detect_team import TeamDetector
-from core.filters import filter_top_10_players, filter_best_ball, OneEuroFilterVectorized, filter_isolated_players
+from core.filters import filter_top_10_players, filter_best_ball, OneEuroFilter, filter_isolated_players
 from core.track_supervisor import TrackSupervisor
 
 # ---------------------------------------------------------------------------
@@ -255,7 +255,7 @@ def process_video(
 
     # Initialisation du filtre 1 Euro pour la caméra
     # mincutoff=0.01 (lissage fort au repos) | beta=0.50 (réactivité rapide en mouvement)
-    state.camera.kp_filter = OneEuroFilterVectorized(mincutoff=0.2, beta=0.5)
+    state.camera.kp_filter = OneEuroFilter(mincutoff=0.2, beta=0.5)
 
     # --- Variables de contrôle inter-frames ---
     prev_hoop_bbox      = None    # Dernière bbox panier connue (pour is_camera_stable)
@@ -533,50 +533,49 @@ def process_video(
                     if logo_cfg is not None:
                         frame = apply_virtual_logo(frame, state, logo_cfg)
 
-           # ---------------------------------------------------------------
+            # ---------------------------------------------------------------
             # ÉTAPE 8 — Détection de tir (3 Métriques Robustes)
             # ---------------------------------------------------------------
             if ball_near and state.hoop_bbox_px is not None:
-
                 scores = {}
 
-                # 1. Traversée géométrique de l'arceau (Le Gatekeeper)
+                # 1. Traversée géométrique
                 scores["geometry"] = check_geometric_crossing(
                     list(state.ball_history), state.hoop_bbox_px
                 )
 
-                # 2. Variation de l'aire du filet (SAM)
+                # 2. Variation de l'aire du filet (La fameuse cloche)
+                # Note: On ne passe que l'historique, plus besoin du masque courant
                 scores["net_area"] = check_net_area_variation(
-                    state.net_mask, list(state.net_area_history)
+                    list(state.net_area_history)
                 )
 
-                # 3. Flux optique dans la zone du panier
-                scores["optical"] = get_hoop_optical_flow(
-                    state.prev_frame_bgr, frame, state.hoop_bbox_px
+                # 3. Flux optique masqué (On calcule d'abord la frame T)
+                current_flow = get_hoop_optical_flow(
+                    state.prev_frame_bgr, frame, state.hoop_bbox_px, state.net_mask
+                )
+                state.optical_flow_history.append(current_flow)
+                
+                # Puis on évalue la signature temporelle
+                scores["optical"] = check_optical_flow_signature(
+                    list(state.optical_flow_history)
                 )
 
                 state.shot_scores = scores
 
                 # --- Validation du tir (Logique Veto + Poids) ---
-                # Règle 1 : La balle DOIT géométriquement croiser l'arceau
-                if scores["geometry"] > 0.1:
+                if scores["geometry"] > 0.1: # La balle a physiquement traversé l'arceau
                     
-                    # Règle 2 : Pondération des signaux physiques
-                    # SAM est très fiable (poids fort), le flux optique est un bonus (poids faible)
+                    # SAM pèse 70%, le mouvement continu du filet 30%
                     physical_score = (scores["net_area"] * 0.70) + (scores["optical"] * 0.30)
                     
-                    # Si on détecte une déformation physique suffisante
                     if physical_score >= SHOT_CONFIDENCE_THRESHOLD:
-                        
                         cooldown_ok = (state.frame_idx - last_shot_frame) >= SHOT_COOLDOWN_FRAMES
 
                         if cooldown_ok:
                             state.events.append("SHOT_DETECTED")
                             last_shot_frame = state.frame_idx
-                            logger.info(
-                                f"  [TIR DÉTECTÉ] Frame {state.frame_idx} "
-                                f"| Geom: {scores['geometry']:.2f} | Phys: {physical_score:.2f}"
-                            )
+                            logger.info(f"  [TIR DÉTECTÉ] Frame {state.frame_idx} | Geom: {scores['geometry']:.2f} | Phys: {physical_score:.2f}")
 
             # ---------------------------------------------------------------
             # ÉTAPE 9 — Mise à jour de l'historique de la balle
@@ -689,7 +688,7 @@ def process_video(
 
 if __name__ == "__main__":
 
-    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/nantes_long.mp4")
+    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
     OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
 
     parser = argparse.ArgumentParser(

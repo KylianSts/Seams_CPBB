@@ -66,54 +66,99 @@ def check_geometric_crossing(ball_history: list, hoop_bbox: tuple) -> float:
     return float(max(0.0, 1.0 - (dist_to_center / max_dist)))
 
 # ---------------------------------------------------------------------------
-# 2. VALIDATION PHYSIQUE (SAM2 - Aire du filet)
+# 2. VALIDATION PHYSIQUE (SAM2 - Gonflement du filet)
 # ---------------------------------------------------------------------------
-
-def check_net_area_variation(current_net_mask: np.ndarray, net_area_history: List[float]) -> float:
+def check_net_area_variation(net_area_history: list) -> float:
     """
-    Compare l'aire actuelle du filet à la moyenne historique (stabilité).
-    Retourne le ratio de variation.
+    Analyse la courbe en cloche de l'aire du filet (Change Point Detection).
+    Cherche une expansion soutenue par rapport à une baseline au repos.
     """
-    if current_net_mask is None or len(net_area_history) < 5:
+    # Il faut au moins ~10 frames d'historique pour voir une bosse se former
+    if len(net_area_history) < 10:
         return 0.0
 
-    current_area = np.sum(current_net_mask)
-    avg_area = sum(net_area_history) / len(net_area_history)
+    # La "Baseline" (filet au repos) = le 20ème percentile (ignore les valeurs aberrantes basses)
+    baseline_area = np.percentile(net_area_history, 20)
     
-    if avg_area == 0: return 0.0
+    if baseline_area < 100:  # Sécurité si le masque est vide ou buggé
+        return 0.0
+        
+    # L'aire maximale atteinte très récemment (sur les 5 dernières frames)
+    recent_max_area = max(net_area_history[-5:])
     
-    variation = (current_area - avg_area) / avg_area
-    # On retourne la variation positive (gonflement du filet)
-    return max(0.0, variation)
+    # Calcul du ratio d'expansion
+    expansion_ratio = (recent_max_area - baseline_area) / baseline_area
+    
+    # Normalisation : un vrai Swish fait gonfler le filet d'environ 40% à 80%
+    # On donne le score max (1.0) dès 50% d'expansion
+    score = expansion_ratio / 0.50
+    
+    return float(min(1.0, max(0.0, score)))
 
 
 # ---------------------------------------------------------------------------
-# 3. VALIDATION PAR FLUX OPTIQUE (Mouvement interne)
+# 3. VALIDATION PAR FLUX OPTIQUE (Mouvement interne masqué)
 # ---------------------------------------------------------------------------
-
-def get_hoop_optical_flow(prev_frame: np.ndarray, curr_frame: np.ndarray, hoop_bbox: Tuple[float, float, float, float]) -> float:
+def get_hoop_optical_flow(prev_frame: np.ndarray, curr_frame: np.ndarray, hoop_bbox: tuple, net_mask: np.ndarray) -> float:
     """
-    Calcule le mouvement moyen à l'intérieur de la zone du panier.
-    Utile pour détecter un filet qui bouge même si SAM2 ne l'isole pas parfaitement.
+    Calcule la magnitude du flux optique UNIQUEMENT sur les pixels du filet (masqué par SAM).
+    Renvoie le mouvement moyen pour la frame T.
     """
-    if prev_frame is None or curr_frame is None or hoop_bbox is None:
+    if prev_frame is None or curr_frame is None or hoop_bbox is None or net_mask is None:
         return 0.0
 
-    # Crop de la zone du panier (avec une petite marge)
     x1, y1, x2, y2 = map(int, hoop_bbox)
     margin = 20
-    roi_prev = prev_frame[max(0, y1-margin):y2+margin, max(0, x1-margin):x2+margin]
-    roi_curr = curr_frame[max(0, y1-margin):y2+margin, max(0, x1-margin):x2+margin]
+    h_img, w_img = curr_frame.shape[:2]
     
-    if roi_prev.size == 0 or roi_curr.size == 0: return 0.0
+    # Sécurité des bords
+    y1_m, y2_m = max(0, y1-margin), min(h_img, y2+margin)
+    x1_m, x2_m = max(0, x1-margin), min(w_img, x2+margin)
 
-    # Conversion en gris
+    roi_prev = prev_frame[y1_m:y2_m, x1_m:x2_m]
+    roi_curr = curr_frame[y1_m:y2_m, x1_m:x2_m]
+    mask_crop = net_mask[y1_m:y2_m, x1_m:x2_m]
+    
+    if roi_prev.size == 0 or not np.any(mask_crop): 
+        return 0.0
+
     gray_prev = cv2.cvtColor(roi_prev, cv2.COLOR_BGR2GRAY)
     gray_curr = cv2.cvtColor(roi_curr, cv2.COLOR_BGR2GRAY)
 
-    # Calcul du flux optique (Farneback est robuste)
     flow = cv2.calcOpticalFlowFarneback(gray_prev, gray_curr, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-    
-    # On calcule la magnitude moyenne du mouvement
     mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-    return float(np.mean(mag))
+    
+    # LA MAGIE : On multiplie le mouvement par le masque (0 ou 1)
+    masked_mag = mag * mask_crop.astype(np.float32)
+    net_pixels_count = np.sum(mask_crop)
+    
+    if net_pixels_count == 0:
+        return 0.0
+        
+    avg_net_movement = np.sum(masked_mag) / net_pixels_count
+    
+    # Normalisation : un mouvement moyen de 5 pixels par frame est très fort
+    return float(min(1.0, avg_net_movement / 5.0))
+
+
+def check_optical_flow_signature(flow_history: list, threshold: float = 0.25, min_duration: int = 3) -> float:
+    """
+    Change Point Detection sur l'historique du flux optique.
+    Renvoie 1.0 si le filet a bougé de manière CONTINUE pendant au moins 'min_duration' frames.
+    """
+    if len(flow_history) < min_duration:
+        return 0.0
+        
+    consecutive_frames = 0
+    max_consecutive = 0
+    
+    for val in flow_history:
+        if val >= threshold:
+            consecutive_frames += 1
+            if consecutive_frames > max_consecutive:
+                max_consecutive = consecutive_frames
+        else:
+            consecutive_frames = 0
+            
+    # Si on a détecté une vague de mouvement soutenue, c'est validé
+    return 1.0 if max_consecutive >= min_duration else 0.0
