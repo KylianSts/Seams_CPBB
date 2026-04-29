@@ -65,8 +65,15 @@ def load_ar_assets(config: LogoConfig) -> bool:
     return True
 
 def apply_virtual_logo(frame: np.ndarray, state: MatchState, config: LogoConfig) -> np.ndarray:
-    """Incruste un seul logo avec gestion de l'occlusion."""
+    """
+    Incruste un logo de manière réaliste (Mode Produit / Multiply).
+    Préserve les textures, reflets et ombres du parquet sous le logo.
+    """
     if config._logo_img is None or config._world_corners is None or state.camera.H_matrix is None:
+        return frame
+
+    # Optimisation : On ne calcule rien si l'AR est en mode invisible
+    if getattr(state, 'ar_alpha_multiplier', 0.0) <= 0.0:
         return frame
 
     h_frame, w_frame = frame.shape[:2]
@@ -81,10 +88,20 @@ def apply_virtual_logo(frame: np.ndarray, state: MatchState, config: LogoConfig)
     H_logo_to_world, _ = cv2.findHomography(logo_pixel_corners, config._world_corners)
     H_final = H_world_to_frame @ H_logo_to_world
 
+    # 1. Warp du logo
     warped_logo = cv2.warpPerspective(config._logo_img, H_final, (w_frame, h_frame), flags=cv2.INTER_LINEAR)
-    warped_rgb = warped_logo[..., :3].astype(np.float32)
-    warped_alpha = (warped_logo[..., 3].astype(np.float32) / 255.0) * config.opacity
+    
+    # --- Le Micro-Flou (Lens Match) ---
+    # Un logo numérique est "trop parfait". On lui donne le flou optique de la caméra.
+    warped_logo = cv2.GaussianBlur(warped_logo, (3, 3), 0)
 
+    warped_rgb = warped_logo[..., :3].astype(np.float32)
+    
+    # Opacité combinée (Config + Machine à état Fade-in)
+    current_opacity = config.opacity * state.ar_alpha_multiplier
+    warped_alpha = (warped_logo[..., 3].astype(np.float32) / 255.0) * current_opacity
+
+    # 2. Gestion de l'occlusion par les joueurs
     if state.player_masks:
         combined_occlusion = np.zeros((h_frame, w_frame), dtype=np.float32)
         for mask_float in state.player_masks:
@@ -92,10 +109,25 @@ def apply_virtual_logo(frame: np.ndarray, state: MatchState, config: LogoConfig)
                 mask_float = mask_float.astype(np.float32)
             if mask_float.shape == combined_occlusion.shape:
                 combined_occlusion = np.maximum(combined_occlusion, mask_float)
+        # On soustrait les joueurs de l'alpha du logo
         warped_alpha = warped_alpha * (1.0 - combined_occlusion)
 
-    out_frame = frame.copy().astype(np.float32)
+    # 3. Préparation des calques pour la fusion physique
+    frame_float = frame.astype(np.float32)
     warped_alpha_3d = warped_alpha[..., np.newaxis]
-    out_frame = out_frame * (1.0 - warped_alpha_3d) + warped_rgb * warped_alpha_3d
 
-    return out_frame.astype(np.uint8)
+    # --- La Fusion "Multiply" (Produit) ---
+    # Au lieu de : frame * (1-a) + logo * a
+    # On fait : frame * (1-a) + (frame * (logo/255)) * a
+    
+    # On normalise le logo entre 0.0 et 1.0 pour la multiplication
+    logo_normalized = warped_rgb / 255.0
+    
+    # Zone où le logo "teinte" le parquet (Multiply)
+    # Les reflets du parquet (zones claires de frame_float) passeront à travers
+    multiplied_zone = frame_float * logo_normalized
+
+    # Fusion finale pondérée par l'alpha
+    out_frame = frame_float * (1.0 - warped_alpha_3d) + multiplied_zone * warped_alpha_3d
+
+    return np.clip(out_frame, 0, 255).astype(np.uint8)

@@ -89,6 +89,9 @@ class MatchState:
     is_whistle_active: bool = False
     is_crowd_active: bool = False
 
+    ar_stable_frames: int = 0          # Compteur de frames depuis que la cam est stable
+    ar_alpha_multiplier: float = 0.0   # Multiplicateur d'opacité (0.0 = invisible, 1.0 = 100%)
+
     # ===========================================================================
     # 6. GESTION DE L'OCCLUSION DE LA BALLE
     # ===========================================================================

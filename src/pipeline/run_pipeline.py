@@ -62,6 +62,9 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 # CONSTANTES
 # ===========================================================================
+# --- Réalité Augmentée ---
+AR_COOLDOWN_FRAMES = 15         # ~1 sec de stabilité requise avant d'afficher
+AR_FADE_FRAMES = 15             # ~0.5 sec pour le fondu (fade-in)
 
 MASK_METHOD = "capsule"
 COURT_L, COURT_W = 28.0, 15.0
@@ -163,7 +166,7 @@ def process_video(
     enable_audio: bool = False,
     enable_ar: bool = True,
     enable_sam: bool = True,
-    enable_supervisor: bool = False,
+    enable_supervisor: bool = True,
     enable_h_smooth: bool = False,
 ) -> None:
 
@@ -341,8 +344,8 @@ def process_video(
             # ---------------------------------------------------------------
 
             # Calcul de la stabilité (basé sur le panier)
-            cam_stable_strict = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_px=5.0)
-            cam_stable_ar = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_px=15.0)
+            cam_stable_strict = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_px=0.02)
+            cam_stable_ar = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_px=0.10)
             
             state.camera.is_stable = cam_stable_strict
 
@@ -459,12 +462,28 @@ def process_video(
             ball_near = state.is_ball_near_hoop_sticky 
             state.active_triggers["ball_near_hoop"] = ball_near
 
-            # Trigger B : Logo AR possible
-            ar_possible = (
-                enable_ar
-                and cam_stable_ar  # <-- On utilise la variable calculée à l'étape 2
-                and state.camera.H_matrix is not None
-            )
+            # -------------------------------------------------------------------
+            # Trigger B : Logo AR possible (Machine à états : Cooldown + Fade-in)
+            # -------------------------------------------------------------------
+            # 1. Si les conditions de stabilité sont réunies, on incrémente le compteur
+            if enable_ar and cam_stable_ar and state.camera.H_matrix is not None:
+                state.ar_stable_frames += 1
+            else:
+                # Disparition IMMÉDIATE au moindre mouvement brusque
+                state.ar_stable_frames = 0
+                state.ar_alpha_multiplier = 0.0 
+
+            # 2. Calcul du fondu (Fade-in)
+            if state.ar_stable_frames >= AR_COOLDOWN_FRAMES:
+                # Le logo a le droit de s'afficher, on calcule son opacité progressive
+                frames_visible = state.ar_stable_frames - AR_COOLDOWN_FRAMES
+                # L'alpha monte progressivement de 0.0 à 1.0
+                state.ar_alpha_multiplier = min(1.0, frames_visible / AR_FADE_FRAMES)
+            else:
+                state.ar_alpha_multiplier = 0.0
+
+            # L'AR est considéré "actif" (pour déclencher SAM sur les joueurs) dès qu'il commence à apparaître
+            ar_possible = state.ar_alpha_multiplier > 0.0
             state.active_triggers["ar_active"] = ar_possible
             
             # Trigger C : Joueurs qui chevauchent la zone des logos → active SAM joueurs
@@ -689,7 +708,7 @@ def process_video(
 
 if __name__ == "__main__":
 
-    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
+    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/nantes_long.mp4")
     OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
 
     parser = argparse.ArgumentParser(
