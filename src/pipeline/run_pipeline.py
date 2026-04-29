@@ -50,7 +50,7 @@ from core.spatial_triggers import is_ball_near_hoop, get_players_in_ar_zone, is_
 from core.render import render_debug_frame
 from core.metrics import compute_kinematics
 from core.detect_team import TeamDetector
-from core.filters import filter_top_10_players, filter_best_ball, OneEuroFilter, filter_isolated_players
+from core.filters import filter_top_10_players, filter_best_ball, OneEuroFilter, filter_isolated_players, bidirectional_smooth
 from core.track_supervisor import TrackSupervisor
 
 # ---------------------------------------------------------------------------
@@ -713,6 +713,19 @@ def process_video(
                     # ... Alors à l'instant passé (T-15), la balle est exactement dans le filet !
                     past_snapshot.is_perfect_shot = True
 
+                # --- C. LISSAGE BIDIRECTIONNEL (Zéro Latence) ---
+                for tid, past_player in past_snapshot.players.items():
+                    # On va chercher notre historique brut dédié
+                    if tid in state.players:
+                        full_history = getattr(state.players[tid], 'raw_history', [])
+                    else:
+                        full_history = getattr(past_player, 'raw_history', [])
+                        
+                    # Lissage avec une fenêtre de +/- 7 frames
+                    smoothed_pos = bidirectional_smooth(full_history, past_snapshot.frame_idx, window=7)
+                    if smoothed_pos is not None:
+                        past_player.court_pos_m = smoothed_pos
+
                 # ===============================================================
                 
                 # 3. Dessin final
@@ -810,7 +823,7 @@ def process_video(
 if __name__ == "__main__":
 
     SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
-    OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
+    OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test_2.mp4")
 
     parser = argparse.ArgumentParser(
         description="Pipeline de démonstration basket V2",

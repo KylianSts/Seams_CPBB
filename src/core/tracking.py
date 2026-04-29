@@ -141,35 +141,29 @@ def update_players_tracking(
             if track_id in state.players:
                 old_history = state.players[track_id].pos_history_m
                 old_speed = state.players[track_id].speed_kmh
-                old_court_pos = state.players[track_id].court_pos_m 
-                player_filter = state.players[track_id].pos_filter # NOUVEAU
+                # NOUVEAU : On récupère notre historique brut dédié au dessin
+                raw_history = getattr(state.players[track_id], 'raw_history', deque(maxlen=40))
             else:
                 old_history = deque(maxlen=30)
                 old_speed = 0.0
-                old_court_pos = None 
-                # Paramètres à tuner : mincutoff bas = lisse à l'arrêt, beta haut = réactif en sprint
-                player_filter = OneEuroFilter(mincutoff=0.2, beta=0.0) 
-            # ------------------------------------------------
+                raw_history = deque(maxlen=40)
 
-            # --- LISSAGE 1 EURO (Remplace l'EMA) ---
-            if raw_court_pos is not None:
-                # Le filtre attend un numpy array
-                raw_pos_array = np.array(raw_court_pos, dtype=np.float32)
-                smoothed_pos = player_filter(current_t, raw_pos_array)
-                final_court_pos = (float(smoothed_pos[0]), float(smoothed_pos[1]))
-            else:
-                final_court_pos = None
-            # ------------------------------------------------
+            # --- SAUVEGARDE BRUTE (Pour le lissage bidirectionnel) ---
+            final_court_pos = raw_court_pos
+            if final_court_pos is not None:
+                raw_history.append((state.frame_idx, final_court_pos[0], final_court_pos[1]))
 
             player = PlayerState(
                 track_id=track_id,
                 bbox_px=(float(x1), float(y1), float(x2), float(y2)),
                 foot_pos_px=(foot_x, foot_y),
                 court_pos_m=final_court_pos,
-                pos_history_m=old_history,  
+                pos_history_m=old_history,  # Intact : laissé à disposition de compute_kinematics
                 speed_kmh=old_speed,
-                pos_filter=player_filter    # NOUVEAU : On sauvegarde le filtre
+                pos_filter=None 
             )
+            # On attache notre historique dynamiquement au joueur
+            player.raw_history = raw_history
 
             new_players_dict[track_id] = player
 

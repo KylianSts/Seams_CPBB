@@ -178,3 +178,33 @@ def filter_isolated_players(raw_players: list, max_overlap_ratio: float = 0.05) 
     # On retourne les joueurs certifiés sains
     isolated_players = [raw_players[i] for i in range(n) if not is_occluded[i]]
     return isolated_players
+
+
+def bidirectional_smooth(pos_history, target_frame_idx: int, window: int = 7) -> Optional[Tuple[float, float]]:
+    """
+    Lissage bidirectionnel (Non-Causal) pour la minimap.
+    Regarde les positions brutes dans le passé et dans le futur autour de `target_frame_idx`.
+    """
+    points_x = []
+    points_y = []
+    weights = []
+
+    for item in pos_history:
+        # SÉCURITÉ : On s'assure que l'élément est bien un tuple de 3 (frame, x, y)
+        if len(item) != 3:
+            continue
+            
+        f_idx, x, y = item
+        dist = abs(f_idx - target_frame_idx)
+        
+        if dist <= window:
+            w = 1.0 - (dist / (window + 1.0))
+            points_x.append(x * w)
+            points_y.append(y * w)
+            weights.append(w)
+
+    if not weights:
+        return None
+
+    sum_w = sum(weights)
+    return (sum(points_x) / sum_w, sum(points_y) / sum_w)
