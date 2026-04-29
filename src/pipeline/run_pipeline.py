@@ -284,6 +284,7 @@ def process_video(
 
     # --- Variables de contrôle inter-frames ---
     prev_hoop_bbox      = None    # Dernière bbox panier connue (pour is_camera_stable)
+    prev_court_kp       = None    # NOUVEAU : Derniers keypoints connus du terrain
     last_shot_frame     = -9999   # Frame du dernier tir validé (cooldown)
     whistle_frames_left = 0       # Compteur d'affichage du sifflet à l'écran
 
@@ -368,9 +369,17 @@ def process_video(
             # On met à jour le repère du monde AVANT de placer les joueurs dedans
             # ---------------------------------------------------------------
 
-            # Calcul de la stabilité (basé sur le panier)
-            cam_stable_strict = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_ratio=0.05)
-            cam_stable_ar = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_ratio=0.15)
+            # Calcul de la stabilité (basé sur le panier + validation croisée terrain)
+            cam_stable_strict = is_camera_stable(
+                state.hoop_bbox_px, prev_hoop_bbox, 
+                state.court_keypoints_px, prev_court_kp, 
+                vid_w, threshold_ratio=0.05
+            )
+            cam_stable_ar = is_camera_stable(
+                state.hoop_bbox_px, prev_hoop_bbox, 
+                state.court_keypoints_px, prev_court_kp, 
+                vid_w, threshold_ratio=0.15
+            )
             
             state.camera.is_stable = cam_stable_strict
 
@@ -408,6 +417,10 @@ def process_video(
             # Mémorisation pour la frame suivante
             if state.hoop_bbox_px is not None:
                 prev_hoop_bbox = state.hoop_bbox_px
+                
+            # NOUVEAU : On sauvegarde les points du sol
+            if state.court_keypoints_px is not None:
+                prev_court_kp = state.court_keypoints_px.copy()
 
             # ---------------------------------------------------------------
             # NOUVELLE ÉTAPE 3 (Ex-Etape 2) — Tracking des joueurs
@@ -796,8 +809,8 @@ def process_video(
 
 if __name__ == "__main__":
 
-    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_layup.mp4")
-    OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test_2.mp4")
+    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
+    OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
 
     parser = argparse.ArgumentParser(
         description="Pipeline de démonstration basket V2",

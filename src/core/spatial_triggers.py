@@ -8,6 +8,7 @@ quand activer les modèles d'IA lourds (comme SAM 2).
 
 import logging
 from typing import Dict, Optional, Tuple, List
+import math
 
 from core.state import PlayerState
 
@@ -75,42 +76,62 @@ def get_players_in_ar_zone(
 
 
 def is_camera_stable(
-    current_hoop_bbox: Optional[Tuple[float, float, float, float]], 
-    prev_hoop_bbox: Optional[Tuple[float, float, float, float]], 
-    threshold_ratio: float = 0.02  # 2% de la largeur du panier
+    current_hoop_bbox,
+    prev_hoop_bbox,
+    current_court_kp,
+    prev_court_kp,
+    vid_w: int,
+    threshold_ratio: float = 0.05,
+    kp_threshold_ratio: float = 0.002  # 0.2% de la largeur de la vidéo
 ) -> bool:
     """
-    Détermine si la caméra est stable en mesurant le déplacement relatif du panier.
-    Indispensable pour gérer différentes résolutions vidéo (720p, 1080p, 4K).
-    
-    Args:
-        current_hoop_bbox: [x1, y1, x2, y2] à T
-        prev_hoop_bbox: [x1, y1, x2, y2] à T-1
-        threshold_ratio: Déplacement maximal autorisé (en % de la largeur de la BBox).
+    Stratégie C (Validation Croisée) : 
+    1. Regarde le panier (Rapide).
+    2. Si le panier bouge, demande au sol de confirmer (Vérité Absolue).
     """
-    if current_hoop_bbox is None or prev_hoop_bbox is None:
-        return False
+    # ==========================================
+    # 1. TEST DU PANIER (Comportement classique)
+    # ==========================================
+    hoop_stable = False
+    if current_hoop_bbox is not None and prev_hoop_bbox is not None:
+        cx_curr = (current_hoop_bbox[0] + current_hoop_bbox[2]) / 2.0
+        cy_curr = (current_hoop_bbox[1] + current_hoop_bbox[3]) / 2.0
+        cx_prev = (prev_hoop_bbox[0] + prev_hoop_bbox[2]) / 2.0
+        cy_prev = (prev_hoop_bbox[1] + prev_hoop_bbox[3]) / 2.0
 
-    # 1. On calcule le centre du panier actuel
-    curr_w = current_hoop_bbox[2] - current_hoop_bbox[0]
-    if curr_w <= 0:
-        return False
+        # Déplacement en ratio de la largeur de l'écran
+        dist_ratio = math.sqrt((cx_curr - cx_prev)**2 + (cy_curr - cy_prev)**2) / vid_w
         
-    curr_cx = current_hoop_bbox[0] + (curr_w / 2.0)
-    curr_cy = (current_hoop_bbox[1] + current_hoop_bbox[3]) / 2.0
+        if dist_ratio <= threshold_ratio:
+            hoop_stable = True
     
-    # 2. On calcule le centre du panier précédent
-    prev_cx = (prev_hoop_bbox[0] + prev_hoop_bbox[2]) / 2.0
-    prev_cy = (prev_hoop_bbox[1] + prev_hoop_bbox[3]) / 2.0
+    # Si le panier dit que c'est stable, on le croit sur parole (Optimisation)
+    if hoop_stable:
+        return True
+        
+    # ==========================================
+    # 2. TEST DU SOL (Validation Croisée)
+    # ==========================================
+    # Le panier a bougé ! Est-ce la caméra, ou juste la balle dans le filet ?
+    if current_court_kp is not None and prev_court_kp is not None:
+        # On s'assure de ne comparer que les points qui ont été trouvés (x > 0)
+        valid_mask = (current_court_kp[:, 0] > 0) & (prev_court_kp[:, 0] > 0)
+        
+        if np.any(valid_mask):
+            pts_curr = current_court_kp[valid_mask]
+            pts_prev = prev_court_kp[valid_mask]
+            
+            # Calcul du déplacement moyen de toutes les lignes du terrain
+            distances = np.linalg.norm(pts_curr - pts_prev, axis=1)
+            mean_dist_ratio = np.mean(distances) / vid_w
+            
+            # Si le sol a bougé de moins de 0.2% de l'image, la caméra est fixe !
+            if mean_dist_ratio <= kp_threshold_ratio:
+                # Le filet nous mentait. On annule l'alerte.
+                return True 
 
-    # 3. Calcul de la distance de déplacement (Euclidienne)
-    movement_px = ((curr_cx - prev_cx)**2 + (curr_cy - prev_cy)**2)**0.5
-
-    # 4. Conversion en pourcentage de la taille de l'objet
-    movement_ratio = movement_px / curr_w
-
-    # 5. La caméra est stable si le mouvement relatif est inférieur au seuil
-    return float(movement_ratio) < threshold_ratio
+    # Si on arrive ici : le panier a bougé ET le sol a confirmé le mouvement
+    return False
 
 
 def is_ball_falling(ball_history: list, window: int = 5, min_dy_px: float = 2.0) -> bool:
