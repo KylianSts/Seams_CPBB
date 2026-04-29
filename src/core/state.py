@@ -215,7 +215,7 @@ class MatchState:
             # Valeurs scalaires (copiées par valeur automatiquement)
             ar_alpha_multiplier=self.ar_alpha_multiplier,
             camera_matrix=self.camera.H_matrix.copy() if self.camera.H_matrix is not None else None,
-            camera_stable=getattr(self.camera, 'is_stable_strict', False),
+            camera_stable=getattr(self.camera, 'is_stable_strict', getattr(self.camera, 'is_stable', False)),
             
             is_whistle_active=self.is_whistle_active,
             is_crowd_active=self.is_crowd_active,
