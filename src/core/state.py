@@ -64,6 +64,8 @@ class FrameSnapshot:
     optical_flow_history: list
     net_area_history: list
 
+    is_perfect_shot: bool = False
+
 @dataclass
 class PlayerState:
     """État d'un joueur unique sur la frame courante."""

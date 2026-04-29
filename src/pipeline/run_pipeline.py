@@ -666,17 +666,47 @@ def process_video(
             if len(look_ahead_buffer) >= LOOK_AHEAD_FRAMES:
                 past_snapshot = look_ahead_buffer.popleft()
 
-                # --- NOUVELLE ÉTAPE 7 (Déplacée dans le passé) ---
-                # On travaille sur une copie de la frame du passé
+                # ===============================================================
+                # 🔮 LES ANTICIPATIONS VISUELLES (MAGIE DU LOOK-AHEAD)
+                # ===============================================================
+                
+                # --- A. ANTICIPATION DU MOUVEMENT (Fade-out du Logo) ---
+                # On scanne le futur (les frames restées dans le buffer + l'état présent)
+                # Pour voir si la caméra va bouger bientôt.
+                frames_before_crash = LOOK_AHEAD_FRAMES
+                
+                for i, future_snap in enumerate(look_ahead_buffer):
+                    if not future_snap.camera_stable:
+                        frames_before_crash = i
+                        break
+                
+                # Si la caméra n'est pas stable dans le présent (state), on vérifie aussi
+                if frames_before_crash == LOOK_AHEAD_FRAMES and not state.camera.is_stable:
+                    frames_before_crash = LOOK_AHEAD_FRAMES - 1
+
+                # S'il y a un crash de caméra imminent (dans les 15 prochaines frames)
+                if frames_before_crash < LOOK_AHEAD_FRAMES:
+                    # On force l'opacité à baisser progressivement AVANT le mouvement
+                    # Ex: S'il reste 7 frames avant le mouvement, l'opacité tombe à 7/15 = 46%
+                    anticipated_alpha = frames_before_crash / float(LOOK_AHEAD_FRAMES)
+                    past_snapshot.ar_alpha_multiplier = min(past_snapshot.ar_alpha_multiplier, anticipated_alpha)
+
+                # --- B. ANTICIPATION DU TIR (Synchro parfaite) ---
+                # Si l'état présent (T) vient tout juste de valider un tir...
+                if "SHOT_DETECTED" in state.events:
+                    # ... Alors à l'instant passé (T-15), la balle est exactement dans le filet !
+                    past_snapshot.is_perfect_shot = True
+
+                # ===============================================================
+                
+                # 3. Dessin final
                 draw_frame = past_snapshot.frame_bgr.copy()
                 
-                # On incruste le logo SI le trigger était actif à ce moment-là
-                if past_snapshot.active_triggers.get("ar_active", False):
+                if past_snapshot.active_triggers.get("ar_active", False) and past_snapshot.ar_alpha_multiplier > 0.0:
                     for logo_cfg in [logo_left, logo_right]:
                         if logo_cfg is not None:
                             draw_frame = apply_virtual_logo(draw_frame, past_snapshot, logo_cfg)
 
-                # --- Rendu final de l'interface ---
                 output_frame = render_debug_frame(draw_frame, past_snapshot, sidebar_w=SIDEBAR_W, hud_h=HUD_H)
                 writer.write(output_frame)
 
@@ -693,7 +723,7 @@ def process_video(
 
         output_frame = render_debug_frame(draw_frame, past_snapshot, sidebar_w=SIDEBAR_W, hud_h=HUD_H)
         writer.write(output_frame)
-        
+
     # =======================================================================
     # FIN
     # =======================================================================
@@ -763,7 +793,7 @@ def process_video(
 
 if __name__ == "__main__":
 
-    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
+    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_layup.mp4")
     OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test_2.mp4")
 
     parser = argparse.ArgumentParser(

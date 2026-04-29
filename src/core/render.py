@@ -50,9 +50,14 @@ def draw_detections(frame: np.ndarray, state: MatchState, txt_hoop: bool = False
     # Panier
     if state.hoop_bbox_px:
         x1, y1, x2, y2 = map(int, state.hoop_bbox_px)
-        cv2.rectangle(out, (x1, y1), (x2, y2), C_HOOP, 1, cv2.LINE_AA)
-        if txt_hoop:
-            cv2.putText(out, "HOOP", (x1, y1 - 5), FONT, 0.45, C_HOOP, 1, cv2.LINE_AA)
+        
+        # --- NOUVEAU : Effet Visuel Anticipé ---
+        # Si c'est la frame exacte du tir parfait, on flashe en vert
+        is_shot = getattr(state, 'is_perfect_shot', False)
+        box_color = C_OK if is_shot else C_HOOP
+        box_thick = 3 if is_shot else 1
+        
+        cv2.rectangle(out, (x1, y1), (x2, y2), box_color, box_thick, cv2.LINE_AA)
 
     # Balle
     if state.ball_bbox_px:
