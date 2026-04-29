@@ -63,12 +63,14 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 # CONSTANTES
 # ===========================================================================
+AR_FADEOUT_FRAMES = 6  # Durée exacte du fondu de disparition
+
 # --- Look-Ahead Buffer ---
 LOOK_AHEAD_FRAMES = 15          # Le rendu aura 15 frames de retard sur l'analyse
 
 # --- Réalité Augmentée ---
 AR_COOLDOWN_FRAMES = 15         # ~1 sec de stabilité requise avant d'afficher
-AR_FADE_FRAMES = 15             # ~0.5 sec pour le fondu (fade-in)
+AR_FADE_FRAMES = 6             # ~0.5 sec pour le fondu (fade-in)
 
 MASK_METHOD = "capsule"
 COURT_L, COURT_W = 28.0, 15.0
@@ -670,9 +672,7 @@ def process_video(
                 # 🔮 LES ANTICIPATIONS VISUELLES (MAGIE DU LOOK-AHEAD)
                 # ===============================================================
                 
-                # --- A. ANTICIPATION DU MOUVEMENT (Fade-out du Logo) ---
-                # On scanne le futur (les frames restées dans le buffer + l'état présent)
-                # Pour voir si la caméra va bouger bientôt.
+                # --- A. ANTICIPATION DU MOUVEMENT (Fade-out Doux du Logo) ---
                 frames_before_crash = LOOK_AHEAD_FRAMES
                 
                 for i, future_snap in enumerate(look_ahead_buffer):
@@ -680,15 +680,18 @@ def process_video(
                         frames_before_crash = i
                         break
                 
-                # Si la caméra n'est pas stable dans le présent (state), on vérifie aussi
                 if frames_before_crash == LOOK_AHEAD_FRAMES and not state.camera.is_stable:
                     frames_before_crash = LOOK_AHEAD_FRAMES - 1
 
-                # S'il y a un crash de caméra imminent (dans les 15 prochaines frames)
-                if frames_before_crash < LOOK_AHEAD_FRAMES:
-                    # On force l'opacité à baisser progressivement AVANT le mouvement
-                    # Ex: S'il reste 7 frames avant le mouvement, l'opacité tombe à 7/15 = 46%
-                    anticipated_alpha = frames_before_crash / float(LOOK_AHEAD_FRAMES)
+                # Si le crash arrive dans la fenêtre de Fade-out prévue
+                if frames_before_crash < AR_FADEOUT_FRAMES:
+                    # Ratio linéaire de 1.0 (loin du crash) à 0.0 (crash imminent)
+                    ratio = frames_before_crash / float(AR_FADEOUT_FRAMES)
+                    
+                    # Courbe d'Easing (Quadratique) pour un rendu "Doux"
+                    # L'opacité baisse doucement au début, puis chute vite à la fin.
+                    anticipated_alpha = ratio * ratio 
+                    
                     past_snapshot.ar_alpha_multiplier = min(past_snapshot.ar_alpha_multiplier, anticipated_alpha)
 
                 # --- B. ANTICIPATION DU TIR (Synchro parfaite) ---
