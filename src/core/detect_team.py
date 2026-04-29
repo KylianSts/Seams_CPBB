@@ -96,42 +96,46 @@ class TeamDetector:
         logger.info(f"Calibration GMM terminée ({len(data)} échantillons sur {self.frames_collected} frames).")
 
 
-    def update(self, state: MatchState, frame: np.ndarray) -> None:
-        """Inférence avec Soft Voting Quadratique, Seuil de Rejet et Rééquilibrage."""
+    def update(self, state: MatchState, frame: np.ndarray, isolated_track_ids: set) -> None:
+        """
+        Collecte les preuves brutes du GMM (Probabilités et Isolation).
+        La décision finale sera prise plus tard par le Juge Temporel (Bidirectionnel).
+        """
         if not self.is_calibrated:
             return 
 
-        active_ids = set(state.players.keys())
-        self.player_votes = {k: v for k, v in self.player_votes.items() if k in active_ids}
-
-        # 1. Calcul des votes pour chaque joueur
         for track_id, player in state.players.items():
+            
+            # 1. HYSTÉRÉSIS : Si le joueur est déjà verrouillé, on économise le CPU !
+            if getattr(player, 'is_team_locked', False):
+                player.team_id = player.locked_team_id
+                continue
+
+            # 2. Est-ce que le joueur est "propre" (isolé) sur cette frame ?
+            is_isolated = track_id in isolated_track_ids
+            
             hist = self._get_torso_histogram(frame, player.bbox_px)
             
             if hist is not None:
-                # Probabilités brutes du GMM (ex: [0.80, 0.20])
+                # On récupère les probabilités pures du modèle (ex: [0.85, 0.15])
                 probs = self.gmm.predict_proba([hist])[0] 
                 
-                # SEUIL DE REJET : Si le GMM est trop incertain, on ignore l'image
-                if np.max(probs) < 0.65:
-                    pass # On ne vote pas, on laisse l'historique faire son travail
-                else:
-                    # AMPLIFICATION (Score Quadratique)
-                    squared_probs = probs ** 2
+                # 3. STOCKAGE DES PREUVES DANS LE CASIER (Pour le Juge Temporel)
+                if hasattr(player, 'gmm_history'):
+                    player.gmm_history.append((
+                        state.frame_idx, 
+                        float(probs[0]), 
+                        float(probs[1]), 
+                        is_isolated
+                    ))
                     
-                    # Normalisation pour que la somme fasse toujours 1.0 (100%)
-                    weighted_probs = squared_probs / np.sum(squared_probs)
-                    
-                    if track_id not in self.player_votes:
-                        self.player_votes[track_id] = deque(maxlen=self.history_size)
-                    self.player_votes[track_id].append(weighted_probs)
-
-            # DÉCISION INITIALE PAR MOYENNE LISSÉE
-            if track_id in self.player_votes and len(self.player_votes[track_id]) > 0:
-                all_probs = np.array(list(self.player_votes[track_id]))
-                mean_probs = np.mean(all_probs, axis=0)
+                # On incrémente le compteur de frames "pures"
+                if is_isolated and hasattr(player, 'pure_frames_count'):
+                    player.pure_frames_count += 1
                 
-                player.team_id = int(np.argmax(mean_probs))
+                # 4. Décision Temporaire (Évite que les joueurs clignotent en gris en attendant l'Étape 4)
+                # On donne la couleur brute de l'instant T
+                player.team_id = int(np.argmax(probs))
 
 
         # ==========================================
@@ -162,3 +166,6 @@ class TeamDetector:
             # Les X premiers sont forcés dans l'équipe adverse
             for i in range(len(team_1_players) - 5):
                 team_1_players[i].team_id = 0
+
+
+

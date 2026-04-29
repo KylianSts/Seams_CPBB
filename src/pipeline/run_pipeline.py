@@ -438,9 +438,21 @@ def process_video(
             )
 
             # ---------------------------------------------------------------
-            # ÉTAPE 3.5 — Détection des équipes
+            # ÉTAPE 3.5 — Détection des équipes (Collecte des preuves)
             # ---------------------------------------------------------------
-            team_detector.update(state, frame)
+            # 1. On identifie quels joueurs sont parfaitement isolés (pas d'occlusion)
+            # On formate les boîtes pour la fonction filter_isolated_players
+            raw_boxes_for_isolation = [
+                (p.bbox_px[0], p.bbox_px[1], p.bbox_px[2], p.bbox_px[3], 1.0, tid) 
+                for tid, p in state.players.items()
+            ]
+            isolated_boxes = filter_isolated_players(raw_boxes_for_isolation, max_overlap_ratio=0.10)
+            
+            # On crée un Set (ensemble) des IDs isolés pour une recherche ultra-rapide
+            isolated_tids = {box[5] for box in isolated_boxes}
+
+            # 2. On met à jour le casier de preuves (GMM)
+            team_detector.update(state, frame, isolated_tids)
 
             # ---------------------------------------------------------------
             # ÉTAPE 4 — Calcul de la cinématique (Vitesse des joueurs)
@@ -722,7 +734,7 @@ def process_video(
                         full_history = getattr(past_player, 'raw_history', [])
                         
                     # Lissage avec une fenêtre de +/- 7 frames
-                    smoothed_pos = bidirectional_smooth(full_history, past_snapshot.frame_idx, window=7)
+                    smoothed_pos = bidirectional_smooth(full_history, past_snapshot.frame_idx, window=15)
                     if smoothed_pos is not None:
                         past_player.court_pos_m = smoothed_pos
 
@@ -822,8 +834,8 @@ def process_video(
 
 if __name__ == "__main__":
 
-    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
-    OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test_2.mp4")
+    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_layup.mp4")
+    OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
 
     parser = argparse.ArgumentParser(
         description="Pipeline de démonstration basket V2",
