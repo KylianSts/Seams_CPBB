@@ -164,7 +164,7 @@ def process_video(
     enable_ar: bool = True,
     enable_sam: bool = True,
     enable_supervisor: bool = False,
-    enable_h_smooth: bool = False,
+    enable_h_smooth: bool = True,
 ) -> None:
 
     # =======================================================================
@@ -237,16 +237,29 @@ def process_video(
     vid_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     vid_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 
-    # --- ARCHITECTURE RESPONSIVE ---
-    # La Sidebar prendra 35% de la largeur de la vidéo d'origine (min 400px)
-    SIDEBAR_W = max(400, int(vid_w * 0.35))
-    
-    # Le HUD prendra 6% de la hauteur de la vidéo d'origine (min 45px, max 80px)
+    # --- ARCHITECTURE RESPONSIVE (Calcul parfait du Ratio FIBA) ---
     HUD_H = min(80, max(45, int(vid_h * 0.06)))
+    sidebar_h_target = vid_h + HUD_H
+    
+    # Objectif : On veut que le terrain prenne exactement la moitié de la hauteur (50%)
+    half_h = sidebar_h_target / 2.0
+    
+    # On retire les marges Y (environ 15% d'espace réservé pour le titre et l'aération)
+    avail_h_for_court = half_h * 0.85
+    
+    # Le terrain fait 28m x 15m (Ratio = 1.866)
+    # Pour remplir 'avail_h_for_court', la largeur idéale doit être :
+    ideal_court_w = avail_h_for_court * (28.0 / 15.0)
+    
+    # On rajoute les marges horizontales de la sidebar (environ 8% de vide au total)
+    SIDEBAR_W = int(ideal_court_w / 0.92)
+    
+    # Sécurité minimale
+    SIDEBAR_W = max(400, SIDEBAR_W)
 
     # Dimensions finales de la vidéo exportée
     out_w = vid_w + SIDEBAR_W
-    out_h = vid_h + HUD_H
+    out_h = sidebar_h_target
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
@@ -347,8 +360,8 @@ def process_video(
             # ---------------------------------------------------------------
 
             # Calcul de la stabilité (basé sur le panier)
-            cam_stable_strict = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_ratio=0.02)
-            cam_stable_ar = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_ratio=0.10)
+            cam_stable_strict = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_ratio=0.05)
+            cam_stable_ar = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_ratio=0.15)
             
             state.camera.is_stable = cam_stable_strict
 

@@ -148,7 +148,7 @@ def update_players_tracking(
                 old_speed = 0.0
                 old_court_pos = None 
                 # Paramètres à tuner : mincutoff bas = lisse à l'arrêt, beta haut = réactif en sprint
-                player_filter = OneEuroFilter(mincutoff=0.20, beta=0.50) 
+                player_filter = OneEuroFilter(mincutoff=0.2, beta=0.0) 
             # ------------------------------------------------
 
             # --- LISSAGE 1 EURO (Remplace l'EMA) ---

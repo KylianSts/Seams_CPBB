@@ -352,19 +352,16 @@ def build_top_hud(total_width: int, hud_h: int, state: MatchState) -> np.ndarray
 # 3. SIDEBAR DROITE (Minimap Horizontale + Futur Dashboard)
 # ===========================================================================
 
+# ===========================================================================
+# 3. SIDEBAR DROITE (Responsive & 50/50 Pur)
+# ===========================================================================
+
 def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarray:
-    """
-    Génère la barre latérale droite (Responsive & 50/50).
-    Moitié Haute : Minimap 2D (centrée et auto-scalée).
-    Moitié Basse : Dashboard tactique adaptatif.
-    """
     sidebar = np.full((sidebar_h, sidebar_w, 3), C_BG_DARK, dtype=np.uint8)
 
-    # --- FACTEUR D'ÉCHELLE GLOBAL UI ---
-    # On utilise 400px comme largeur de référence pour le texte
-    scale_f = sidebar_w / 400.0  
+    # --- CORRECTION 1 : La base de référence est 900px, pas 400px ---
+    scale_f = sidebar_w / 900.0  
 
-    # Marges adaptatives
     mg_x = int(sidebar_w * 0.04)
     mg_y = int(sidebar_h * 0.03)
     half_h = sidebar_h // 2
@@ -372,33 +369,28 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     # ==========================================
     # MOITIÉ HAUTE : MINIMAP
     # ==========================================
-    # On garantit que le terrain rentre parfaitement dans la moitié haute
-    title_space = int(30 * scale_f)
+    title_space = int(40 * scale_f)
     avail_w = sidebar_w - (mg_x * 2)
     avail_h = half_h - (mg_y * 2) - title_space
 
-    # On calcule les échelles possibles en X et en Y
     sc_w = avail_w / COURT_L
     sc_h = avail_h / COURT_W
-    sc = min(sc_w, sc_h) # La contrainte la plus forte l'emporte pour ne pas déborder
+    sc = min(sc_w, sc_h)
 
     court_px_w = int(COURT_L * sc)
     court_px_h = int(COURT_W * sc)
 
-    # Centrage automatique de la minimap dans l'espace disponible
     offset_x = mg_x + (avail_w - court_px_w) // 2
     offset_y = mg_y + title_space
 
-    # Fond du terrain
     cv2.rectangle(sidebar, (offset_x, offset_y), (offset_x + court_px_w, offset_y + court_px_h), C_COURT, -1)
 
-    # Tailles de polices dynamiques
     f_title = 0.50 * scale_f
     f_main = 0.45 * scale_f
     f_sub = 0.40 * scale_f
 
-    # --- En-tête : Titre + Statistiques ---
-    title_y = mg_y + int(10 * scale_f)
+    # --- En-tête ---
+    title_y = mg_y + int(15 * scale_f)
     title_txt = "MINIMAP & DASHBOARD"
     cv2.putText(sidebar, title_txt, (offset_x, title_y), FONT_MONO, f_title, (240, 240, 245), 1, cv2.LINE_AA)
     
@@ -413,9 +405,7 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
 
     lw = max(1, round(sc * 0.035))
 
-    # --- PROJECTION HORIZONTALE ---
     def court_to_px(x_m, y_m):
-        # On utilise le ratio calculé et les offsets de centrage
         px = int(x_m * sc) + offset_x
         py = int(y_m * sc) + offset_y
         return px, py
@@ -424,9 +414,7 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
         pts_px = np.array([court_to_px(p[0], p[1]) for p in pts], dtype=np.int32)
         cv2.polylines(sidebar, [pts_px.reshape(-1, 1, 2)], closed, C_LINE, lw, cv2.LINE_AA)
 
-    # ==========================================
-    # DESSIN DU TERRAIN FIBA
-    # ==========================================
+    # --- LIGNES DU TERRAIN ---
     pline([[0, 0], [COURT_L, 0], [COURT_L, COURT_W], [0, COURT_W]], closed=True)
     pline([[14.0, 0.0], [14.0, COURT_W]])
     cx, cy = court_to_px(14.0, 7.5)
@@ -454,9 +442,7 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     cx_b_r, cy_b_r = court_to_px(26.425, 7.5)
     cv2.circle(sidebar, (cx_b_r, cy_b_r), max(2, int(0.225 * sc)), C_LINE, lw, cv2.LINE_AA)
     
-    # ==========================================
-    # INDICATEUR DE DIRECTION D'ATTAQUE
-    # ==========================================
+    # --- FLÈCHE D'ATTAQUE ---
     target_hoop = getattr(state, 'target_hoop', None)
     
     if state.attacking_team_id is not None and target_hoop is not None:
@@ -467,12 +453,7 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
         dir_sign = 1 if is_attacking_right else -1
         color = C_TEAM_A if state.attacking_team_id == 0 else C_TEAM_B
         
-        # Coordonnées mises à l'échelle (scale_f)
-        s_4 = int(4 * scale_f)
-        s_6 = int(6 * scale_f)
-        s_10 = int(10 * scale_f)
-        s_18 = int(18 * scale_f)
-        s_24 = int(24 * scale_f)
+        s_4, s_6, s_10, s_18, s_24 = int(4*scale_f), int(6*scale_f), int(10*scale_f), int(18*scale_f), int(24*scale_f)
         
         pts = np.array([
             [center_x - s_18 * dir_sign, arrow_y - s_4], 
@@ -489,9 +470,7 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
         cv2.fillPoly(sidebar, [pts_shadow], (20, 20, 25), cv2.LINE_AA)
         cv2.fillPoly(sidebar, [pts], color, cv2.LINE_AA)
 
-    # ==========================================
-    # AFFICHAGE DES JOUEURS
-    # ==========================================
+    # --- JOUEURS ---
     dot_r = max(4, int(sc * 0.45))
     halo_th = max(1, int(2 * scale_f))
     
@@ -499,10 +478,7 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
         if player.court_pos_m is None:
             continue
         X_m, Y_m = player.court_pos_m
-        
-        X_m = max(0.0, min(COURT_L, X_m))
-        Y_m = max(0.0, min(COURT_W, Y_m))
-        px, py = court_to_px(X_m, Y_m)
+        px, py = court_to_px(max(0.0, min(COURT_L, X_m)), max(0.0, min(COURT_W, Y_m)))
 
         if player.team_id == 0: color = C_TEAM_A
         elif player.team_id == 1: color = C_TEAM_B
@@ -511,34 +487,29 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
         cv2.circle(sidebar, (px, py), dot_r, color, -1, cv2.LINE_AA)
         cv2.circle(sidebar, (px, py), dot_r, (255, 255, 255), halo_th, cv2.LINE_AA) 
 
-        # HALO VERT TOURNANT (Si ouvert)
         if getattr(player, 'is_open', False):
             angle_start = (state.frame_idx * 10) % 360
             angle_end = angle_start + 180
-            C_OPEN = (100, 255, 100)
             cv2.ellipse(sidebar, (px, py), (dot_r + int(5*scale_f), dot_r + int(5*scale_f)), 
-                        0, angle_start, angle_end, C_OPEN, halo_th, cv2.LINE_AA)
+                        0, angle_start, angle_end, (100, 255, 100), halo_th, cv2.LINE_AA)
 
-    # --- SÉPARATEUR GAUCHE ET PLACEHOLDER DASHBOARD ---
     cv2.line(sidebar, (0, 0), (0, sidebar_h), (60, 60, 70), max(1, int(2 * scale_f)))
 
     # ==========================================
     # ZONE DASHBOARD TACTIQUE (PREMIUM UI)
     # ==========================================
-    # On démarre le dashboard exactement à la moitié (half_h)
-    dash_start_y = half_h
+    dash_start_y = offset_y + court_px_h + int(45 * scale_f)
     cv2.line(sidebar, (0, dash_start_y), (sidebar_w, dash_start_y), (80, 80, 90), max(1, int(2 * scale_f)))
     
-    # Redistribution des colonnes en pourcentages
+    # --- CORRECTION 2 : Espacement des colonnes revu pour éviter le chevauchement ---
     COL_LBL = mg_x
-    COL_A   = int(sidebar_w * 0.35)
-    COL_B   = int(sidebar_w * 0.55)
-    COL_ALL = int(sidebar_w * 0.72)
-    COL_DIF = int(sidebar_w * 0.88)
+    COL_A   = int(sidebar_w * 0.32)
+    COL_B   = int(sidebar_w * 0.50)
+    COL_ALL = int(sidebar_w * 0.68)
+    COL_DIF = int(sidebar_w * 0.85)
     
     y_curr = dash_start_y + int(30 * scale_f)
     
-    # En-têtes (Typographie épurée et grise)
     header_color = (130, 130, 140)
     cv2.putText(sidebar, "METRIQUE", (COL_LBL, y_curr), FONT_MONO, f_sub, header_color, 1, cv2.LINE_AA)
     cv2.putText(sidebar, "EQUIPE A", (COL_A, y_curr), FONT_MONO, f_sub, C_TEAM_A, 1, cv2.LINE_AA)
@@ -551,13 +522,11 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     y_curr += int(40 * scale_f)
 
     def draw_section(title: str, y: int) -> int:
-        """Dessine un titre de section sobre avec un accent de couleur discret."""
         cv2.putText(sidebar, title.upper(), (mg_x, y), FONT_MONO, f_main, (180, 180, 190), 1, cv2.LINE_AA)
         cv2.line(sidebar, (mg_x, y + int(10 * scale_f)), (mg_x + int(100 * scale_f), y + int(10 * scale_f)), C_WARN, max(1, int(2 * scale_f)))
         return y + int(35 * scale_f)
     
     def draw_row(label: str, val_a: float, val_b: float, val_all: float, y_pos: int, unit: str = "", is_sub: bool = False) -> int:
-        """Dessine une ligne avec gestion de l'indentation et du style hiérarchique."""
         font_scale = 0.35 * scale_f if is_sub else f_sub
         label_color = (160, 160, 170) if is_sub else (230, 230, 240)
         val_color = (130, 130, 140) if is_sub else (255, 255, 255)
@@ -587,7 +556,6 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     m_a = state.team_metrics[0]
     m_b = state.team_metrics[1]
     
-    # --- SECTION 1 : CINÉMATIQUE ---
     y_curr = draw_section("Performance Athletique", y_curr)
     
     y_curr = draw_row("Vitesse Moy.", m_a["avg_speed"], m_b["avg_speed"], state.avg_speed_kmh, y_curr, " km/h")
@@ -603,14 +571,12 @@ def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarr
     
     y_curr += int(20 * scale_f)
     
-    # --- SECTION 2 : TACTIQUE ---
     y_curr = draw_section("Placement & Spatialisation", y_curr)
     y_curr = draw_row("Spacing (Aire)", m_a["spacing"], m_b["spacing"], 0, y_curr, " m2")
     y_curr = draw_row("Dans Raquette", m_a["paint_count"], m_b["paint_count"], m_a["paint_count"] + m_b["paint_count"], y_curr, " jou.")
 
     y_curr += int(25 * scale_f)
 
-    # --- BLOC D'ALERTE (Style épuré) ---
     total_paint = m_a["paint_count"] + m_b["paint_count"]
     alert_active = total_paint > 4
     
