@@ -31,6 +31,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import subprocess
+from collections import deque
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -62,6 +63,9 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 # CONSTANTES
 # ===========================================================================
+# --- Look-Ahead Buffer ---
+LOOK_AHEAD_FRAMES = 15          # Le rendu aura 15 frames de retard sur l'analyse
+
 # --- Réalité Augmentée ---
 AR_COOLDOWN_FRAMES = 15         # ~1 sec de stabilité requise avant d'afficher
 AR_FADE_FRAMES = 15             # ~0.5 sec pour le fondu (fade-in)
@@ -319,6 +323,9 @@ def process_video(
     
     # ON REMBOBINE LA VIDÉO À LA FRAME 0 POUR LE VRAI TRAITEMENT
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    # --- INITIALISATION DU BUFFER ---
+    look_ahead_buffer = deque()
 
     with tqdm(total=total, unit="frame", desc="Pipeline V2") as pbar:
         while True:
@@ -648,15 +655,35 @@ def process_video(
             state.prev_frame_bgr = frame.copy()
 
             # ---------------------------------------------------------------
-            # ÉTAPE 12 — Rendu et écriture
+            # ÉTAPE 12 — Rendu Différé (Look-Ahead Buffer)
             # ---------------------------------------------------------------
-            output_frame = render_debug_frame(frame, state, sidebar_w=SIDEBAR_W, hud_h=HUD_H)
-            writer.write(output_frame)
+            # 1. On prend la photo de l'instant Présent (T)
+            snapshot = state.take_snapshot(frame)
+            look_ahead_buffer.append(snapshot)
+
+            # 2. Si le buffer est "plein", on dessine la frame du Passé (T - 15)
+            if len(look_ahead_buffer) >= LOOK_AHEAD_FRAMES:
+                past_snapshot = look_ahead_buffer.popleft()
+
+                # --- C'est ICI qu'on fera nos anticipations dans le futur ! ---
+                # Exemple : si la caméra bouge au présent (state), 
+                # on baisse l'opacité de l'AR dans le passé (past_snapshot)
+                
+                # On dessine en utilisant le snapshot au lieu du state global
+                output_frame = render_debug_frame(past_snapshot.frame_bgr, past_snapshot, sidebar_w=SIDEBAR_W, hud_h=HUD_H)
+                writer.write(output_frame)
+
+    # Vidage du Look-Ahead Buffer à la fin de la vidéo
+    logger.info("Vidage final du buffer de rendu...")
+    while len(look_ahead_buffer) > 0:
+        past_snapshot = look_ahead_buffer.popleft()
+        output_frame = render_debug_frame(past_snapshot.frame_bgr, past_snapshot, sidebar_w=SIDEBAR_W, hud_h=HUD_H)
+        writer.write(output_frame)
 
     # =======================================================================
     # FIN
     # =======================================================================
-    cap.release()
+    cap.release()     
     if writer is not None:
         writer.release()
     cv2.destroyAllWindows()  # Sécurité : ferme bien toutes les fenêtres d'OpenCV
