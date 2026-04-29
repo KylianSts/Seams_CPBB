@@ -169,7 +169,7 @@ def process_video(
     enable_audio: bool = False,
     enable_ar: bool = True,
     enable_sam: bool = True,
-    enable_supervisor: bool = False,
+    enable_supervisor: bool = True,
     enable_h_smooth: bool = True,
 ) -> None:
 
@@ -725,18 +725,30 @@ def process_video(
                     # ... Alors à l'instant passé (T-15), la balle est exactement dans le filet !
                     past_snapshot.is_perfect_shot = True
 
-                # --- C. LISSAGE BIDIRECTIONNEL (Zéro Latence) ---
+                # --- C. LISSAGE BIDIRECTIONNEL (Positions Minimap) ---
                 for tid, past_player in past_snapshot.players.items():
-                    # On va chercher notre historique brut dédié
+                    # On utilise l'historique brut dédié
                     if tid in state.players:
                         full_history = getattr(state.players[tid], 'raw_history', [])
                     else:
                         full_history = getattr(past_player, 'raw_history', [])
                         
-                    # Lissage avec une fenêtre de +/- 7 frames
                     smoothed_pos = bidirectional_smooth(full_history, past_snapshot.frame_idx, window=15)
                     if smoothed_pos is not None:
                         past_player.court_pos_m = smoothed_pos
+
+                # --- D. CLASSIFICATION D'ÉQUIPE BIDIRECTIONNELLE (Couleurs) ---
+                if supervisor is not None:
+                    for tid, past_player in past_snapshot.players.items():
+                        # On récupère le joueur du présent (state) pour avoir son historique GMM complet
+                        # (qui contient les 15 frames de "futur" par rapport à ce snapshot)
+                        current_player = state.players.get(tid, past_player)
+                        
+                        # Le Juge Temporel analyse le dossier (passé + futur) pour décider
+                        best_team = supervisor.resolve_team_color(current_player, past_snapshot.frame_idx, window=15)
+                        
+                        # On applique la décision sur l'objet qu'on s'apprête à dessiner
+                        past_player.team_id = best_team
 
                 # ===============================================================
                 
@@ -756,6 +768,19 @@ def process_video(
     while len(look_ahead_buffer) > 0:
         past_snapshot = look_ahead_buffer.popleft()
         
+        # --- LISSAGE ET CLASSIFICATION FINALE ---
+        for tid, past_player in past_snapshot.players.items():
+            # Smoothing
+            raw_h = getattr(past_player, 'raw_history', [])
+            smoothed_pos = bidirectional_smooth(raw_h, past_snapshot.frame_idx, window=15)
+            if smoothed_pos is not None:
+                past_player.court_pos_m = smoothed_pos
+                
+            # Classification d'équipe
+            if supervisor is not None:
+                past_player.team_id = supervisor.resolve_team_color(past_player, past_snapshot.frame_idx, window=15)
+
+        # Dessin et écriture
         draw_frame = past_snapshot.frame_bgr.copy()
         if past_snapshot.active_triggers.get("ar_active", False):
             for logo_cfg in [logo_left, logo_right]:
@@ -888,5 +913,6 @@ if __name__ == "__main__":
         enable_audio=not args.no_audio,
         enable_ar=not args.no_ar,
         enable_sam=not args.no_sam,
+        enable_supervisor=not args.no_veto,
         enable_h_smooth=not args.no_h_smooth,
     )
