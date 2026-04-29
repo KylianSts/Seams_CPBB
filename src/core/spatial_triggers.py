@@ -77,32 +77,40 @@ def get_players_in_ar_zone(
 def is_camera_stable(
     current_hoop_bbox: Optional[Tuple[float, float, float, float]], 
     prev_hoop_bbox: Optional[Tuple[float, float, float, float]], 
-    threshold_px: float = 5.0
+    threshold_ratio: float = 0.02  # 2% de la largeur du panier
 ) -> bool:
     """
-    Détermine si la caméra est stable en comparant la position du panier
-    entre deux frames. Indispensable pour l'affichage propre du logo AR.
+    Détermine si la caméra est stable en mesurant le déplacement relatif du panier.
+    Indispensable pour gérer différentes résolutions vidéo (720p, 1080p, 4K).
     
     Args:
         current_hoop_bbox: [x1, y1, x2, y2] à T
         prev_hoop_bbox: [x1, y1, x2, y2] à T-1
-        threshold_px: Déplacement maximal autorisé en pixels pour être "stable".
+        threshold_ratio: Déplacement maximal autorisé (en % de la largeur de la BBox).
     """
     if current_hoop_bbox is None or prev_hoop_bbox is None:
         return False
 
-    # 1. On calcule le centre du panier pour les deux frames
-    curr_cx = (current_hoop_bbox[0] + current_hoop_bbox[2]) / 2.0
+    # 1. On calcule le centre du panier actuel
+    curr_w = current_hoop_bbox[2] - current_hoop_bbox[0]
+    if curr_w <= 0:
+        return False
+        
+    curr_cx = current_hoop_bbox[0] + (curr_w / 2.0)
     curr_cy = (current_hoop_bbox[1] + current_hoop_bbox[3]) / 2.0
     
+    # 2. On calcule le centre du panier précédent
     prev_cx = (prev_hoop_bbox[0] + prev_hoop_bbox[2]) / 2.0
     prev_cy = (prev_hoop_bbox[1] + prev_hoop_bbox[3]) / 2.0
 
-    # 2. Calcul de la distance de déplacement (Euclidienne)
-    movement = ((curr_cx - prev_cx)**2 + (curr_cy - prev_cy)**2)**0.5
+    # 3. Calcul de la distance de déplacement (Euclidienne)
+    movement_px = ((curr_cx - prev_cx)**2 + (curr_cy - prev_cy)**2)**0.5
 
-    # 3. La caméra est stable si le mouvement est inférieur au seuil
-    return movement < threshold_px
+    # 4. Conversion en pourcentage de la taille de l'objet
+    movement_ratio = movement_px / curr_w
+
+    # 5. La caméra est stable si le mouvement relatif est inférieur au seuil
+    return float(movement_ratio) < threshold_ratio
 
 
 def is_ball_falling(ball_history: list, window: int = 5, min_dy_px: float = 2.0) -> bool:
