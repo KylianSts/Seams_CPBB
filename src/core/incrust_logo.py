@@ -69,7 +69,7 @@ def apply_virtual_logo(frame: np.ndarray, state: MatchState, config: LogoConfig)
     Incruste un logo de manière réaliste (Mode Produit / Multiply).
     Préserve les textures, reflets et ombres du parquet sous le logo.
     """
-    if config._logo_img is None or config._world_corners is None or state.camera.H_matrix is None:
+    if config._logo_img is None or config._world_corners is None or state.camera_matrix is None:
         return frame
 
     # Optimisation : On ne calcule rien si l'AR est en mode invisible
@@ -80,7 +80,7 @@ def apply_virtual_logo(frame: np.ndarray, state: MatchState, config: LogoConfig)
     h_logo, w_logo = config._logo_img.shape[:2]
 
     try:
-        H_world_to_frame = np.linalg.inv(state.camera.H_matrix)
+        H_world_to_frame = np.linalg.inv(state.camera_matrix)
     except np.linalg.LinAlgError:
         return frame
 

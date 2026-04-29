@@ -26,6 +26,9 @@ class FrameSnapshot:
     players: dict          # Copie profonde pour figer les coordonnées et les IDs
     ball_bbox_px: Optional[Tuple[float, float, float, float]]
     hoop_bbox_px: Optional[Tuple[float, float, float, float]]
+
+    court_keypoints_px: Optional[np.ndarray]
+    court_keypoints_conf: Optional[np.ndarray]
     
     # --- Masques ---
     player_masks: list
@@ -57,6 +60,9 @@ class FrameSnapshot:
     
     target_hoop: Optional[Tuple[float, float]]
     attacking_team_id: Optional[int]
+
+    optical_flow_history: list
+    net_area_history: list
 
 @dataclass
 class PlayerState:
@@ -192,6 +198,9 @@ class MatchState:
             
             ball_bbox_px=self.ball_bbox_px,
             hoop_bbox_px=self.hoop_bbox_px,
+
+            court_keypoints_px=self.court_keypoints_px.copy() if self.court_keypoints_px is not None else None,
+            court_keypoints_conf=self.court_keypoints_conf.copy() if self.court_keypoints_conf is not None else None,
             
             # Sécurisation des masques numpy
             player_masks=[m.copy() if isinstance(m, np.ndarray) else m for m in self.player_masks],
@@ -220,5 +229,8 @@ class MatchState:
             max_accel_ms2=self.max_accel_ms2,
             
             target_hoop=self.target_hoop,
-            attacking_team_id=self.attacking_team_id
+            attacking_team_id=self.attacking_team_id,
+
+            optical_flow_history=list(self.optical_flow_history),
+            net_area_history=list(self.net_area_history),
         )

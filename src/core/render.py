@@ -152,7 +152,7 @@ def draw_zones_and_masks(frame: np.ndarray, state: MatchState, margin_ratio: flo
         conf = state.court_keypoints_conf
         
         # Utilisation de la bonne variable de stabilité selon les modifs précédentes
-        cam_stable = getattr(state.camera, 'is_stable_strict', getattr(state.camera, 'is_stable', False))
+        cam_stable = state.camera_stable
         color = C_KP_RECYCLED if cam_stable else C_KP_ACTIVE
 
         for i, kp in enumerate(state.court_keypoints_px):
@@ -237,7 +237,7 @@ def build_top_hud(total_width: int, hud_h: int, state: MatchState) -> np.ndarray
     cursor = gap_main
 
     # Stabilité caméra
-    cam_ok = getattr(state.camera, 'is_stable_strict', getattr(state.camera, 'is_stable', False))
+    cam_ok = state.camera_stable
     cursor = put(hud, "CAM:STABLE" if cam_ok else "CAM:MOVING", cursor, C_OK if cam_ok else C_WARN)
     put(hud, "|", cursor - gap_tiny, C_OFF)
     cursor += gap_small
