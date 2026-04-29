@@ -10,7 +10,53 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 from collections import deque
 import numpy as np
+import copy
 
+@dataclass
+class FrameSnapshot:
+    """
+    Capture 'congelée' de l'état à la frame T.
+    Utilisée par le Look-Ahead Buffer pour dessiner le passé sans subir
+    les modifications du futur.
+    """
+    frame_idx: int
+    frame_bgr: np.ndarray  # L'image brute (doit être un .copy() strict)
+    
+    # --- Detections & Tracking ---
+    players: dict          # Copie profonde pour figer les coordonnées et les IDs
+    ball_bbox_px: Optional[Tuple[float, float, float, float]]
+    hoop_bbox_px: Optional[Tuple[float, float, float, float]]
+    
+    # --- Masques ---
+    player_masks: list
+    net_mask: Optional[np.ndarray]
+    
+    # --- UI & Triggers ---
+    active_triggers: dict
+    shot_scores: dict
+    
+    # --- Réalité Augmentée ---
+    ar_alpha_multiplier: float
+    camera_matrix: Optional[np.ndarray]
+    camera_stable: bool
+    
+    # --- Audio ---
+    is_whistle_active: bool
+    is_crowd_active: bool
+    
+    # --- Stats Sidebar (Cinématique & Tactique) ---
+    team_metrics: list
+    avg_speed_kmh: float
+    std_speed_kmh: float
+    min_speed_kmh: float
+    max_speed_kmh: float
+    avg_accel_ms2: float
+    std_accel_ms2: float
+    min_accel_ms2: float
+    max_accel_ms2: float
+    
+    target_hoop: Optional[Tuple[float, float]]
+    attacking_team_id: Optional[int]
 
 @dataclass
 class PlayerState:
@@ -130,3 +176,49 @@ class MatchState:
     # ===========================================================================
     attacking_team_id: Optional[int] = None
     target_hoop: Optional[Tuple[float, float]] = None
+
+    def take_snapshot(self, current_frame: np.ndarray) -> FrameSnapshot:
+        """
+        Crée une copie déconnectée de la mémoire pour le rendu différé.
+        Crucial : On utilise copy() et deepcopy() pour empêcher le buffer
+        d'être modifié par les frames futures.
+        """
+        return FrameSnapshot(
+            frame_idx=self.frame_idx,
+            frame_bgr=current_frame.copy(),  # TRÈS IMPORTANT : fige les pixels
+            
+            # deepcopy fige l'état de chaque objet Player (position, couleur, id)
+            players=copy.deepcopy(self.players), 
+            
+            ball_bbox_px=self.ball_bbox_px,
+            hoop_bbox_px=self.hoop_bbox_px,
+            
+            # Sécurisation des masques numpy
+            player_masks=[m.copy() if isinstance(m, np.ndarray) else m for m in self.player_masks],
+            net_mask=self.net_mask.copy() if self.net_mask is not None else None,
+            
+            # Sécurisation des dictionnaires
+            active_triggers=self.active_triggers.copy(),
+            shot_scores=self.shot_scores.copy(),
+            
+            # Valeurs scalaires (copiées par valeur automatiquement)
+            ar_alpha_multiplier=self.ar_alpha_multiplier,
+            camera_matrix=self.camera.H_matrix.copy() if self.camera.H_matrix is not None else None,
+            camera_stable=getattr(self.camera, 'is_stable_strict', False),
+            
+            is_whistle_active=self.is_whistle_active,
+            is_crowd_active=self.is_crowd_active,
+            
+            team_metrics=copy.deepcopy(self.team_metrics),
+            avg_speed_kmh=self.avg_speed_kmh,
+            std_speed_kmh=self.std_speed_kmh,
+            min_speed_kmh=self.min_speed_kmh,
+            max_speed_kmh=self.max_speed_kmh,
+            avg_accel_ms2=self.avg_accel_ms2,
+            std_accel_ms2=self.std_accel_ms2,
+            min_accel_ms2=self.min_accel_ms2,
+            max_accel_ms2=self.max_accel_ms2,
+            
+            target_hoop=self.target_hoop,
+            attacking_team_id=self.attacking_team_id
+        )
