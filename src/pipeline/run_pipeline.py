@@ -98,9 +98,6 @@ SHOT_CONFIDENCE_THRESHOLD = 0.4
 # --- Durée d'affichage du sifflet à l'écran ---
 WHISTLE_DISPLAY_FRAMES = 15     # ~0.5 sec à 30fps
 
-# --- Taille des panneaux de rendu ---
-SIDEBAR_W = 900
-
 
 # ===========================================================================
 # FONCTIONS UTILITAIRES INTERNES
@@ -166,7 +163,7 @@ def process_video(
     enable_audio: bool = False,
     enable_ar: bool = True,
     enable_sam: bool = True,
-    enable_supervisor: bool = True,
+    enable_supervisor: bool = False,
     enable_h_smooth: bool = False,
 ) -> None:
 
@@ -240,10 +237,16 @@ def process_video(
     vid_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     vid_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 
-    # Dimensions de la frame de sortie (Schéma: Gauche=Vidéo, Droite=Sidebar)
-    HUD_H = 55
+    # --- ARCHITECTURE RESPONSIVE ---
+    # La Sidebar prendra 35% de la largeur de la vidéo d'origine (min 400px)
+    SIDEBAR_W = max(400, int(vid_w * 0.35))
+    
+    # Le HUD prendra 6% de la hauteur de la vidéo d'origine (min 45px, max 80px)
+    HUD_H = min(80, max(45, int(vid_h * 0.06)))
+
+    # Dimensions finales de la vidéo exportée
     out_w = vid_w + SIDEBAR_W
-    out_h = vid_h + HUD_H  # La hauteur max est dictée par le bloc de gauche
+    out_h = vid_h + HUD_H
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
@@ -274,7 +277,7 @@ def process_video(
     # =======================================================================
     # PRE-FLIGHT : Calibration des équipes (Optimisé V2)
     # =======================================================================
-    SAMPLES_NEEDED = 500 # On vise 100 frames réparties sur tout le match
+    SAMPLES_NEEDED = 200 # On vise 100 frames réparties sur tout le match
     team_detector = TeamDetector(calibration_frames=SAMPLES_NEEDED, history_size=75)
     
     # Calcul du saut en nombre de frames
@@ -344,8 +347,8 @@ def process_video(
             # ---------------------------------------------------------------
 
             # Calcul de la stabilité (basé sur le panier)
-            cam_stable_strict = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_px=0.02)
-            cam_stable_ar = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_px=0.10)
+            cam_stable_strict = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_ratio=0.02)
+            cam_stable_ar = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, threshold_ratio=0.10)
             
             state.camera.is_stable = cam_stable_strict
 
@@ -634,12 +637,10 @@ def process_video(
             # ---------------------------------------------------------------
             # ÉTAPE 12 — Rendu et écriture
             # ---------------------------------------------------------------
-            output_frame = render_debug_frame(frame, state, sidebar_w=SIDEBAR_W)
+            output_frame = render_debug_frame(frame, state, sidebar_w=SIDEBAR_W, hud_h=HUD_H)
             writer.write(output_frame)
 
-            pbar.update(1)
-
-# =======================================================================
+    # =======================================================================
     # FIN
     # =======================================================================
     cap.release()
@@ -708,7 +709,7 @@ def process_video(
 
 if __name__ == "__main__":
 
-    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/nantes_long.mp4")
+    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
     OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
 
     parser = argparse.ArgumentParser(
