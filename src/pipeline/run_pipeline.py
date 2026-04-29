@@ -569,12 +569,13 @@ def process_video(
 
             # ---------------------------------------------------------------
             # ÉTAPE 7 — Incrustation du logo AR
+            # -> SUPPRIMÉ D'ICI ! Le logo sera dessiné dans le passé (Étape 12)
             # On applique le logo avec les masques SAM joueurs pour l'occlusion.
             # ---------------------------------------------------------------
-            if ar_possible:
-                for logo_cfg in [logo_left, logo_right]:
-                    if logo_cfg is not None:
-                        frame = apply_virtual_logo(frame, state, logo_cfg)
+            #if ar_possible:
+            #    for logo_cfg in [logo_left, logo_right]:
+            #        if logo_cfg is not None:
+            #            frame = apply_virtual_logo(frame, state, logo_cfg)
 
             # ---------------------------------------------------------------
             # ÉTAPE 8 — Détection de tir (3 Métriques Robustes)
@@ -657,7 +658,7 @@ def process_video(
             # ---------------------------------------------------------------
             # ÉTAPE 12 — Rendu Différé (Look-Ahead Buffer)
             # ---------------------------------------------------------------
-            # 1. On prend la photo de l'instant Présent (T)
+            # 1. On prend la photo de l'instant Présent (T) avec une frame vierge de logo
             snapshot = state.take_snapshot(frame)
             look_ahead_buffer.append(snapshot)
 
@@ -665,21 +666,34 @@ def process_video(
             if len(look_ahead_buffer) >= LOOK_AHEAD_FRAMES:
                 past_snapshot = look_ahead_buffer.popleft()
 
-                # --- C'est ICI qu'on fera nos anticipations dans le futur ! ---
-                # Exemple : si la caméra bouge au présent (state), 
-                # on baisse l'opacité de l'AR dans le passé (past_snapshot)
+                # --- NOUVELLE ÉTAPE 7 (Déplacée dans le passé) ---
+                # On travaille sur une copie de la frame du passé
+                draw_frame = past_snapshot.frame_bgr.copy()
                 
-                # On dessine en utilisant le snapshot au lieu du state global
-                output_frame = render_debug_frame(past_snapshot.frame_bgr, past_snapshot, sidebar_w=SIDEBAR_W, hud_h=HUD_H)
+                # On incruste le logo SI le trigger était actif à ce moment-là
+                if past_snapshot.active_triggers.get("ar_active", False):
+                    for logo_cfg in [logo_left, logo_right]:
+                        if logo_cfg is not None:
+                            draw_frame = apply_virtual_logo(draw_frame, past_snapshot, logo_cfg)
+
+                # --- Rendu final de l'interface ---
+                output_frame = render_debug_frame(draw_frame, past_snapshot, sidebar_w=SIDEBAR_W, hud_h=HUD_H)
                 writer.write(output_frame)
 
     # Vidage du Look-Ahead Buffer à la fin de la vidéo
     logger.info("Vidage final du buffer de rendu...")
     while len(look_ahead_buffer) > 0:
         past_snapshot = look_ahead_buffer.popleft()
-        output_frame = render_debug_frame(past_snapshot.frame_bgr, past_snapshot, sidebar_w=SIDEBAR_W, hud_h=HUD_H)
-        writer.write(output_frame)
+        
+        draw_frame = past_snapshot.frame_bgr.copy()
+        if past_snapshot.active_triggers.get("ar_active", False):
+            for logo_cfg in [logo_left, logo_right]:
+                if logo_cfg is not None:
+                    draw_frame = apply_virtual_logo(draw_frame, past_snapshot, logo_cfg)
 
+        output_frame = render_debug_frame(draw_frame, past_snapshot, sidebar_w=SIDEBAR_W, hud_h=HUD_H)
+        writer.write(output_frame)
+        
     # =======================================================================
     # FIN
     # =======================================================================
@@ -750,7 +764,7 @@ def process_video(
 if __name__ == "__main__":
 
     SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_3pts.mp4")
-    OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
+    OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test_2.mp4")
 
     parser = argparse.ArgumentParser(
         description="Pipeline de démonstration basket V2",
