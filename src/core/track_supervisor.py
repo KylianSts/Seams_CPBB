@@ -1,134 +1,100 @@
 """
 track_supervisor.py
 -------------------
-Module de validation métier.
-Examine les résultats du tracker générique et corrige les associations (ID Switches)
-qui violent l'apparence des équipes (GMM). Ne supprime AUCUNE boîte.
+Module de validation métier (Le Juge Temporel).
+Examine l'historique bidirectionnel (gmm_history) pour classifier
+l'équipe de chaque joueur de manière parfaite en ignorant les occlusions.
 """
 
 import logging
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
-def boxes_intersect(b1, b2, margin=15):
-    """
-    Vérifie si deux BBoxes se chevauchent ou sont extrêmement proches.
-    margin: tolérance en pixels pour capter la frame juste après la séparation.
-    """
-    return not (b1[2] < b2[0] - margin or 
-                b1[0] > b2[2] + margin or 
-                b1[3] < b2[1] - margin or 
-                b1[1] > b2[3] + margin)
-
-
 class TrackSupervisor:
     def __init__(self, gmm_veto_threshold: float = 0.65):
+        # Le superviseur n'a plus besoin d'état interne ni de mémoire de mapping,
+        # car toutes les preuves temporelles sont stockées directement dans les joueurs.
+        pass
+
+    def apply_team_veto(self, tracked_objects, frame, state, team_detector) -> list:
         """
-        Args:
-            gmm_veto_threshold: Confiance minimale (ex: 65%) requise par le GMM 
-                                pour autoriser un échange d'ID.
+        Ancienne méthode de correction d'ID maintenue (mais vidée de son code).
+        POURQUOI ? Pour éviter de faire crasher ton run_pipeline.py à l'Étape 3
+        avant que l'on passe à l'Étape 4. Elle ne fait plus rien.
         """
-        self.gmm_veto_threshold = gmm_veto_threshold
-        
-        # Mémoire persistante des corrections du Superviseur
-        # Dictionnaire { original_botSort_id : corrected_id }
-        self.track_mapping = {}
+        return tracked_objects
 
-    def apply_team_veto(self, tracked_objects, frame: np.ndarray, state, team_detector) -> list:
-        if not team_detector.is_calibrated or team_detector.gmm is None:
-            return tracked_objects
+    def resolve_team_color(self, player, target_frame_idx: int, window: int = 15) -> int:
+        """
+        LE JUGE TEMPOREL.
+        Calcule l'équipe d'un joueur à l'instant cible (T-15) en utilisant les preuves 
+        du passé (T-30 à T-16) et du futur (T-14 à T).
+        """
+        # 1. LA SENTENCE EST IRRÉVOCABLE (Hystérésis)
+        # Si le joueur a déjà été certifié, on renvoie son équipe sans aucun calcul.
+        if getattr(player, 'is_team_locked', False) and player.locked_team_id is not None:
+            return player.locked_team_id
 
-        # =======================================================================
-        # 1. EXTRACTION ET TRADUCTION DES IDs (Application de la mémoire)
-        # =======================================================================
-        tracks_data = []
-        for t in tracked_objects:
-            raw_t = t.copy()
-            orig_id = int(raw_t[4])
+        # Sécurité : Si le joueur vient d'apparaître et n'a pas encore de casier
+        if not hasattr(player, 'gmm_history') or not player.gmm_history:
+            return player.team_id if player.team_id is not None else 0
+
+        past_A, past_B = [], []
+        future_A, future_B = [], []
+
+        # 2. EXAMEN DU CASIER DE PREUVES
+        for frame_idx, prob_A, prob_B, is_isolated in player.gmm_history:
             
-            # Application de la mémoire des Swaps précédents
-            mapped_id = self.track_mapping.get(orig_id, orig_id)
-            raw_t[4] = mapped_id 
-
-            x1, y1, x2, y2 = raw_t[:4]
-            
-            # Évaluation GMM
-            predicted_team = None
-            confidence = 0.0
-            hist = team_detector._get_torso_histogram(frame, (x1, y1, x2, y2))
-            if hist is not None:
-                probs = team_detector.gmm.predict_proba([hist])[0]
-                predicted_team = int(np.argmax(probs))
-                confidence = probs[predicted_team]
-
-            tracks_data.append({
-                'raw': raw_t,
-                'orig_id': orig_id,
-                'mapped_id': mapped_id, 
-                'box': (x1, y1, x2, y2),
-                'pred_team': predicted_team,
-                'conf': confidence
-            })
-
-        # =======================================================================
-        # 2. LE SWAP POST-OCCLUSION (L'Arbitre des couleurs)
-        # =======================================================================
-        n = len(tracks_data)
-        swapped_indices = set()
-
-        for i in range(n):
-            if i in swapped_indices: continue
-            
-            td1 = tracks_data[i]
-            id1 = td1['mapped_id']
-            
-            if id1 not in state.players or state.players[id1].team_id is None:
+            # 🚫 RÈGLE D'OR : On ignore complètement les probabilités 
+            # des frames où le joueur était partiellement caché !
+            if not is_isolated:
                 continue
-            hist_team1 = state.players[id1].team_id
+            
+            dist = frame_idx - target_frame_idx
+            
+            # Tri des preuves pures entre le passé et le futur de la frame cible
+            if -window <= dist <= 0:
+                past_A.append(prob_A)
+                past_B.append(prob_B)
+            elif 0 < dist <= window:
+                future_A.append(prob_A)
+                future_B.append(prob_B)
 
-            for j in range(i + 1, n):
-                if j in swapped_indices: continue
-                
-                td2 = tracks_data[j]
-                id2 = td2['mapped_id']
+        all_A = past_A + future_A
+        all_B = past_B + future_B
 
-                if id2 not in state.players or state.players[id2].team_id is None:
-                    continue
-                hist_team2 = state.players[id2].team_id
+        # Si le joueur a été occlusé pendant TOUTE la fenêtre de 30 frames
+        # (ex: énorme mêlée sous le panier), on utilise sa dernière couleur connue.
+        if not all_A:
+            return player.team_id if player.team_id is not None else 0
 
-                # RÈGLE 1 : Équipes adverses uniquement
-                if hist_team1 == hist_team2:
-                    continue
-                
-                # RÈGLE 2 : Proximité. Les boîtes DOIVENT se croiser (ou se frôler à 15px près)
-                if not boxes_intersect(td1['box'], td2['box'], margin=15):
-                    continue
-                
-                # RÈGLE 3 : Le GMM détecte une inversion avec certitude
-                cond_swap1 = (td1['pred_team'] == hist_team2) and (td1['conf'] >= self.gmm_veto_threshold)
-                cond_swap2 = (td2['pred_team'] == hist_team1) and (td2['conf'] >= self.gmm_veto_threshold)
+        # 3. LE VOTE (Moyenne Bidirectionnelle Pure)
+        mean_A = sum(all_A) / len(all_A)
+        mean_B = sum(all_B) / len(all_B)
+        
+        final_team = 0 if mean_A > mean_B else 1
+        confidence = max(mean_A, mean_B)
 
-                if cond_swap1 and cond_swap2:
-                    logger.info(f"✅ [ID SWAP] Croisement corrigé : Échange de {id1} et {id2}.")
-                    
-                    # Mise à jour de la mémoire pour TOUTES les frames futures
-                    orig1, orig2 = td1['orig_id'], td2['orig_id']
-                    self.track_mapping[orig1] = id2
-                    self.track_mapping[orig2] = id1
-                    
-                    # Correction immédiate des variables pour l'affichage de la frame courante
-                    td1['mapped_id'], td2['mapped_id'] = id2, id1
-                    td1['raw'][4], td2['raw'][4] = id2, id1
-                    
-                    swapped_indices.add(i)
-                    swapped_indices.add(j)
-                    break
+        # 4. DÉTECTION DU SHIFT (Le détecteur de mensonge de BotSort)
+        # On vérifie qu'on a assez de données des deux côtés pour faire une comparaison
+        if len(past_A) > 3 and len(future_A) > 3:
+            past_mean_A = sum(past_A) / len(past_A)
+            fut_mean_A = sum(future_A) / len(future_A)
+            
+            # Si l'identité visuelle s'inverse violemment (> 60% de différence)
+            # Exemple : 90% Rouge dans le passé, 15% Rouge dans le futur.
+            if abs(past_mean_A - fut_mean_A) > 0.60:
+                logger.warning(f"⚠️ [SHIFT DÉTECTÉ] ID {player.track_id} : BotSort a inversé deux joueurs.")
+                # C'est un ID corrompu. On refuse de le verrouiller ! 
+                # On retournera juste l'équipe majoritaire autour de cette frame précise.
+                return final_team
 
-        # =======================================================================
-        # 3. RECONSTRUCTION (Aucune suppression)
-        # =======================================================================
-        # On renvoie TOUTES les boîtes, exactement comme BotSort les a fournies, 
-        # avec uniquement l'ID (index 4) potentiellement modifié.
-        final_tracks = [td['raw'] for td in tracks_data]
-        return final_tracks
+        # 5. VERROUILLAGE (Hystérésis)
+        # Si le joueur a accumulé plus de 45 frames pures depuis son entrée sur le terrain,
+        # et que sa certitude est supérieure à 85%.
+        if getattr(player, 'pure_frames_count', 0) > 45 and confidence > 0.85:
+            player.is_team_locked = True
+            player.locked_team_id = final_team
+            logger.info(f"🔒 [VERROU] ID:{player.track_id} certifié Équipe {final_team} (Confiance: {confidence*100:.1f}%)")
+
+        return final_team
