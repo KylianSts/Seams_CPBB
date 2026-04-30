@@ -208,3 +208,48 @@ def bidirectional_smooth(pos_history, target_frame_idx: int, window: int = 7) ->
 
     sum_w = sum(weights)
     return (sum(points_x) / sum_w, sum(points_y) / sum_w)
+
+
+def calculate_occlusion_ratios(players_dict: dict) -> dict:
+    """
+    Calcule le ratio d'occlusion (0.0 à 1.0) de la sous-boîte 'Torse' de chaque joueur.
+    Retourne un dictionnaire { track_id : ratio }.
+    """
+    ratios = {}
+    player_list = list(players_dict.values())
+    n = len(player_list)
+
+    # Fonction locale pour extraire le torse exactement comme dans detect_team.py
+    def get_torso(box):
+        x1, y1, x2, y2 = box
+        w, h = x2 - x1, y2 - y1
+        return (x1 + w * 0.25, y1 + h * 0.20, x2 - w * 0.25, y2 - h * 0.40)
+
+    for i in range(n):
+        p1 = player_list[i]
+        t1 = get_torso(p1.bbox_px)
+        area1 = max(0, t1[2] - t1[0]) * max(0, t1[3] - t1[1])
+
+        max_occlusion = 0.0
+        
+        if area1 > 0:
+            for j in range(n):
+                if i == j: continue
+                p2 = player_list[j]
+                t2 = get_torso(p2.bbox_px)
+
+                # Calcul de l'intersection
+                ix1 = max(t1[0], t2[0])
+                iy1 = max(t1[1], t2[1])
+                ix2 = min(t1[2], t2[2])
+                iy2 = min(t1[3], t2[3])
+
+                if ix1 < ix2 and iy1 < iy2:
+                    inter_area = (ix2 - ix1) * (iy2 - iy1)
+                    ratio = inter_area / area1
+                    if ratio > max_occlusion:
+                        max_occlusion = ratio
+
+        ratios[p1.track_id] = min(1.0, max_occlusion)
+
+    return ratios

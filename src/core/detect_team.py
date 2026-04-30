@@ -35,10 +35,18 @@ class TeamDetector:
         
         self.gmm: Optional[GaussianMixture] = None
         self.player_votes: Dict[int, deque] = {}
+        
+    def _get_dynamic_court_hsv(self, frame: np.ndarray) -> np.ndarray:
+        """Échantillonne une zone sûre (en bas au centre) pour deviner la couleur du parquet."""
+        h, w = frame.shape[:2]
+        # Patch au milieu en bas (90% de chances d'être du parquet pur)
+        patch = frame[int(h * 0.85):int(h * 0.95), int(w * 0.45):int(w * 0.55)]
+        hsv_patch = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+        # On utilise la médiane pour ignorer les lignes blanches du terrain
+        return np.median(hsv_patch, axis=(0, 1))
 
-
-    def _get_torso_histogram(self, frame: np.ndarray, bbox_px: Tuple[float, float, float, float]) -> Optional[np.ndarray]:
-        """Extrait l'histogramme HSV du centre du torse."""
+    def _get_torso_histogram(self, frame: np.ndarray, bbox_px: Tuple[float, float, float, float], court_hsv: np.ndarray) -> Optional[np.ndarray]:
+        """Extrait l'histogramme HSV du torse en excluant dynamiquement la couleur du parquet."""
         x1, y1, x2, y2 = map(int, bbox_px)
         h_img, w_img = frame.shape[:2]
         
@@ -49,7 +57,7 @@ class TeamDetector:
         if w < 10 or h < 20:
             return None
 
-        # CORE CROP : On ignore tête, jambes, et les bords latéraux (bras/occlusions)
+        # CORE CROP
         crop_y1 = y1 + int(h * 0.20)
         crop_y2 = y2 - int(h * 0.40)
         crop_x1 = x1 + int(w * 0.25)
@@ -60,20 +68,36 @@ class TeamDetector:
             return None
 
         torso_hsv = cv2.cvtColor(torso_bgr, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(torso_hsv, (0, 20, 20), (180, 255, 240))
+        
+        # 1. Masque de base (ignore le noir pur et le blanc brûlé)
+        base_mask = cv2.inRange(torso_hsv, (0, 20, 20), (180, 255, 240))
 
-        hist = cv2.calcHist([torso_hsv], [0, 1], mask, [32, 32], [0, 180, 0, 256])
+        # 2. Masque d'exclusion dynamique du parquet (+/- tolérance)
+        lower_court = np.array([max(0, court_hsv[0] - 15), max(0, court_hsv[1] - 50), max(0, court_hsv[2] - 50)])
+        upper_court = np.array([min(180, court_hsv[0] + 15), min(255, court_hsv[1] + 50), min(255, court_hsv[2] + 50)])
+        court_mask = cv2.inRange(torso_hsv, lower_court, upper_court)
+
+        # Le pixel doit être dans la plage de base, ET NE PAS être de la couleur du parquet
+        final_mask = cv2.bitwise_and(base_mask, cv2.bitwise_not(court_mask))
+
+        # S'il ne reste plus de pixels après exclusion (ex: le joueur était de la couleur du parquet !)
+        if cv2.countNonZero(final_mask) == 0:
+            return None
+
+        hist = cv2.calcHist([torso_hsv], [0, 1], final_mask, [32, 32], [0, 180, 0, 256])
         cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
         
         return hist.flatten()
 
 
     def collect_from_raw_boxes(self, frame: np.ndarray, isolated_boxes: List[Tuple]) -> None:
-        """Extrait les histogrammes à partir d'une liste de joueurs préalablement filtrés (isolés)."""
+        """Extrait les histogrammes à partir d'une liste de joueurs isolés."""
         if self.is_calibrated: return
             
+        court_hsv = self._get_dynamic_court_hsv(frame)
+            
         for box in isolated_boxes:
-            hist = self._get_torso_histogram(frame, box[:4])
+            hist = self._get_torso_histogram(frame, box[:4], court_hsv)
             if hist is not None:
                 self.histograms_buffer.append(hist)
                 
@@ -96,45 +120,42 @@ class TeamDetector:
         logger.info(f"Calibration GMM terminée ({len(data)} échantillons sur {self.frames_collected} frames).")
 
 
-    def update(self, state: MatchState, frame: np.ndarray, isolated_track_ids: set) -> None:
+    def update(self, state: MatchState, frame: np.ndarray, occlusion_ratios: dict) -> None:
         """
-        Collecte les preuves brutes du GMM (Probabilités et Isolation).
-        La décision finale sera prise plus tard par le Juge Temporel (Bidirectionnel).
+        Collecte les preuves brutes du GMM et le niveau exact d'occlusion.
         """
         if not self.is_calibrated:
             return 
 
+        court_hsv = self._get_dynamic_court_hsv(frame)
+
         for track_id, player in state.players.items():
             
-            # 1. HYSTÉRÉSIS : Si le joueur est déjà verrouillé, on économise le CPU !
             if getattr(player, 'is_team_locked', False):
                 player.team_id = player.locked_team_id
                 continue
 
-            # 2. Est-ce que le joueur est "propre" (isolé) sur cette frame ?
-            is_isolated = track_id in isolated_track_ids
+            # On récupère le ratio exact (par défaut 0.0 = parfaitement propre)
+            occlusion_ratio = occlusion_ratios.get(track_id, 0.0)
             
-            hist = self._get_torso_histogram(frame, player.bbox_px)
+            hist = self._get_torso_histogram(frame, player.bbox_px, court_hsv)
             
             if hist is not None:
-                # On récupère les probabilités pures du modèle (ex: [0.85, 0.15])
                 probs = self.gmm.predict_proba([hist])[0] 
                 
-                # 3. STOCKAGE DES PREUVES DANS LE CASIER (Pour le Juge Temporel)
+                # 3. STOCKAGE : (frame, probA, probB, RATIO D'OCCLUSION)
                 if hasattr(player, 'gmm_history'):
                     player.gmm_history.append((
                         state.frame_idx, 
                         float(probs[0]), 
                         float(probs[1]), 
-                        is_isolated
+                        float(occlusion_ratio)
                     ))
                     
-                # On incrémente le compteur de frames "pures"
-                if is_isolated and hasattr(player, 'pure_frames_count'):
+                # Pour les stats globales, on considère une frame "pure" si occlusée à moins de 10%
+                if occlusion_ratio <= 0.10 and hasattr(player, 'pure_frames_count'):
                     player.pure_frames_count += 1
                 
-                # 4. Décision Temporaire (Évite que les joueurs clignotent en gris en attendant l'Étape 4)
-                # On donne la couleur brute de l'instant T
                 player.team_id = int(np.argmax(probs))
 
 

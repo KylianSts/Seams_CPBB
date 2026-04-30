@@ -50,7 +50,7 @@ from core.spatial_triggers import is_ball_near_hoop, get_players_in_ar_zone, is_
 from core.render import render_debug_frame
 from core.metrics import compute_kinematics
 from core.detect_team import TeamDetector
-from core.filters import filter_top_10_players, filter_best_ball, OneEuroFilter, filter_isolated_players, bidirectional_smooth
+from core.filters import filter_top_10_players, filter_best_ball, OneEuroFilter, filter_isolated_players, bidirectional_smooth, calculate_occlusion_ratios
 from core.track_supervisor import TrackSupervisor
 
 # ---------------------------------------------------------------------------
@@ -438,21 +438,13 @@ def process_video(
             )
 
             # ---------------------------------------------------------------
-            # ÉTAPE 3.5 — Détection des équipes (Collecte des preuves)
+            # ÉTAPE 3.5 — Détection des équipes (Collecte des preuves continues)
             # ---------------------------------------------------------------
-            # 1. On identifie quels joueurs sont parfaitement isolés (pas d'occlusion)
-            # On formate les boîtes pour la fonction filter_isolated_players
-            raw_boxes_for_isolation = [
-                (p.bbox_px[0], p.bbox_px[1], p.bbox_px[2], p.bbox_px[3], 1.0, tid) 
-                for tid, p in state.players.items()
-            ]
-            isolated_boxes = filter_isolated_players(raw_boxes_for_isolation, max_overlap_ratio=0.10)
-            
-            # On crée un Set (ensemble) des IDs isolés pour une recherche ultra-rapide
-            isolated_tids = {box[5] for box in isolated_boxes}
+            # On calcule le pourcentage d'occlusion exact de chaque joueur
+            occlusion_ratios = calculate_occlusion_ratios(state.players)
 
-            # 2. On met à jour le casier de preuves (GMM)
-            team_detector.update(state, frame, isolated_tids)
+            # On met à jour le casier de preuves du joueur
+            team_detector.update(state, frame, occlusion_ratios)
 
             # ---------------------------------------------------------------
             # ÉTAPE 4 — Calcul de la cinématique (Vitesse des joueurs)
