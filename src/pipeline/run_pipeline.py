@@ -749,7 +749,7 @@ def process_video(
                         current_player = state.players.get(tid, past_player)
                         
                         # Le Juge Temporel analyse le dossier (passé + futur) pour décider
-                        best_team = supervisor.resolve_team_color(current_player, past_snapshot.frame_idx, window=15)
+                        best_team = supervisor.resolve_team_color(current_player, past_snapshot.frame_idx, window=30)
                         
                         # On applique la décision sur l'objet qu'on s'apprête à dessiner
                         past_player.team_id = best_team
