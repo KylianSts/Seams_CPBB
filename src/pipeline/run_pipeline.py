@@ -287,6 +287,8 @@ def process_video(
     prev_court_kp       = None    # NOUVEAU : Derniers keypoints connus du terrain
     last_shot_frame     = -9999   # Frame du dernier tir validé (cooldown)
     whistle_frames_left = 0       # Compteur d'affichage du sifflet à l'écran
+    shot_display_frames_left = 0  # NOUVEAU : Compteur d'affichage du panier vert
+
 
     logger.info(f"Lancement du traitement : {total} frames → {output_path}")
 
@@ -482,25 +484,30 @@ def process_video(
             # 4. LA MACHINE À ÉTATS (Le Gatekeeper intelligent)
             if current_ball_near:
                 if not state.is_ball_near_hoop_sticky:
-                    # La balle est dans la zone, mais l'analyse SAM n'est pas encore active.
-                    # On l'active SI elle descend (Tir classique) OU SI elle frôle l'arceau (Layup en montée)
+                    # Activation : La balle descend ou frôle l'arceau
                     if ball_falling or ball_very_close:
                         state.is_ball_near_hoop_sticky = True
                         state.last_ball_near_hoop_frame = state.frame_idx
                 else:
-                    # DÉJÀ DANS LA ZONE (Mode Sticky Actif)
-                    # On maintient l'état ACTIF même si la balle rebondit (ball_falling = False)
+                    # Maintien : On met à jour l'horloge
                     state.last_ball_near_hoop_frame = state.frame_idx
                     
-            elif ball_detected:
-                # La balle est VUE AILLEURS (hors de la grande zone) → on désactive tout immédiatement
-                state.is_ball_near_hoop_sticky = False
+            elif state.is_ball_near_hoop_sticky:
+                # LA BALLE N'EST PLUS PRÈS DU PANIER (Perdue ou Faux Positif ailleurs)
+                frames_since_last_seen = state.frame_idx - state.last_ball_near_hoop_frame
                 
-            elif (state.frame_idx - state.last_ball_near_hoop_frame) > BALL_LOST_TIMEOUT_FRAMES:
-                # La balle est INVISIBLE depuis trop longtemps → désactivation par timeout
-                state.is_ball_near_hoop_sticky = False
+                if ball_detected:
+                    # CAS A : Une balle est vue AILLEURS.
+                    # PÉRIODE DE GRÂCE : On ignore ce faux positif pendant 15 frames (0.5s)
+                    # pour laisser le temps au tir de se terminer et au filet de bouger.
+                    if frames_since_last_seen > 15:
+                        state.is_ball_near_hoop_sticky = False
+                else:
+                    # CAS B : La balle a totalement disparu de l'écran.
+                    # On applique le grand timeout classique (ex: 45 frames).
+                    if frames_since_last_seen > BALL_LOST_TIMEOUT_FRAMES:
+                        state.is_ball_near_hoop_sticky = False
 
-            # On met à jour le dictionnaire global
             ball_near = state.is_ball_near_hoop_sticky 
             state.active_triggers["ball_near_hoop"] = ball_near
 
@@ -711,11 +718,16 @@ def process_video(
                     
                     past_snapshot.ar_alpha_multiplier = min(past_snapshot.ar_alpha_multiplier, anticipated_alpha)
 
-                # --- B. ANTICIPATION DU TIR (Synchro parfaite) ---
+                # --- B. ANTICIPATION DU TIR (Synchro parfaite + Durée) ---
                 # Si l'état présent (T) vient tout juste de valider un tir...
                 if "SHOT_DETECTED" in state.events:
-                    # ... Alors à l'instant passé (T-15), la balle est exactement dans le filet !
+                    # On lance le compte à rebours visuel (ex: 15 frames = 0.5 sec)
+                    shot_display_frames_left = 15
+
+                # Tant que le compte à rebours est actif, on allume le panier en vert
+                if shot_display_frames_left > 0:
                     past_snapshot.is_perfect_shot = True
+                    shot_display_frames_left -= 1
 
                 # --- C. LISSAGE BIDIRECTIONNEL (Positions Minimap) ---
                 for tid, past_player in past_snapshot.players.items():
@@ -852,7 +864,7 @@ def process_video(
 if __name__ == "__main__":
 
     SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_layup.mp4")
-    OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test.mp4")
+    OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test_2.mp4")
 
     parser = argparse.ArgumentParser(
         description="Pipeline de démonstration basket V2",
