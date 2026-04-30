@@ -89,9 +89,6 @@ class PlayerState:
     # --- NOUVEAU : Classification d'Équipe (GMM Bidirectionnel) ---
     # Stocke les preuves : (frame_idx, proba_A, proba_B, is_isolated)
     gmm_history: deque = field(default_factory=lambda: deque(maxlen=80))
-    is_team_locked: bool = False
-    locked_team_id: Optional[int] = None
-    pure_frames_count: int = 0
 
 @dataclass
 class CameraState:
