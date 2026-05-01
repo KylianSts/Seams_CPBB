@@ -3,27 +3,55 @@ spatial_triggers.py
 -------------------
 Module de "Culling" et de déclencheurs géométriques.
 Fournit des tests mathématiques ultra-rapides (AABB) pour décider 
-quand activer les modèles d'IA lourds (comme SAM 2).
+quand activer les modèles d'IA lourds (comme SAM 2 ou le lissage complexe).
 """
 
-import logging
-from typing import Dict, Optional, Tuple, List
 import math
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from core.state import PlayerState
+import numpy as np
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from core.state import PlayerState
 
+# --- Alias de types ---
+BBox = Tuple[float, float, float, float]  # (x1, y1, x2, y2)
+
+
+@dataclass
+class TriggersConfig:
+    """Configuration centralisée des déclencheurs spatiaux."""
+    
+    # --- Trigger Panier ---
+    # Élargissement de la zone de détection autour du panier.
+    # Un ratio de 1.50 signifie que la zone est agrandie de 150% de sa propre largeur/hauteur.
+    hoop_margin_ratio: float = 1.50 
+    
+    # --- Trigger Caméra (Validation Croisée) ---
+    # Déplacement minimum du panier (en % de la largeur vidéo) pour soupçonner un mouvement de caméra
+    cam_hoop_threshold_ratio: float = 0.05 
+    # Déplacement minimum du sol (en % de la largeur vidéo) pour CONFIRMER un mouvement de caméra
+    cam_floor_threshold_ratio: float = 0.002
+    
+    # --- Trigger Balle (Chute) ---
+    falling_window_frames: int = 5
+    falling_min_dy_px: float = 2.0
+
+
+# ===========================================================================
+# 1. DÉCLENCHEURS DE ZONES (AABB)
+# ===========================================================================
 
 def is_ball_near_hoop(
-    ball_bbox: Optional[Tuple[float, float, float, float]], 
-    hoop_bbox: Optional[Tuple[float, float, float, float]], 
-    margin_ratio: float = 1.50  # 150% d'élargissement par défaut
+    ball_bbox: Optional[BBox], 
+    hoop_bbox: Optional[BBox], 
+    cfg: TriggersConfig = TriggersConfig()
 ) -> bool:
     """
-    Vérifie si la balle se trouve dans la Bounding Box de l'arceau, 
-    élargie de X% proportionnellement de TOUS les côtés.
-    Déclencheur pour allumer la segmentation du filet (SAM 2).
+    Vérifie si la balle se trouve dans la zone d'influence de l'arceau.
+    Déclencheur principal pour activer la segmentation du filet (SAM 2)
+    et les heuristiques de tir.
     """
     if ball_bbox is None or hoop_bbox is None:
         return False
@@ -31,32 +59,32 @@ def is_ball_near_hoop(
     bx1, by1, bx2, by2 = ball_bbox
     hx1, hy1, hx2, hy2 = hoop_bbox
 
-    # Centre de la balle
+    # Centre de masse de la balle
     bcx = (bx1 + bx2) / 2.0
     bcy = (by1 + by2) / 2.0
 
-    # Dimensions natives de la boîte du panier
     w_h = hx2 - hx1
     h_h = hy2 - hy1
 
-    # Élargissement proportionnel de tous les côtés
-    safe_x1 = hx1 - (w_h * margin_ratio)
-    safe_x2 = hx2 + (w_h * margin_ratio)
-    safe_y1 = hy1 - (h_h * margin_ratio)
-    safe_y2 = hy2 + (h_h * margin_ratio)
+    # Élargissement absolu basé sur la dimension courante du panier (résiste au zoom)
+    margin_x = w_h * cfg.hoop_margin_ratio
+    margin_y = h_h * cfg.hoop_margin_ratio
 
-    # Test d'inclusion géométrique
+    safe_x1 = hx1 - margin_x
+    safe_x2 = hx2 + margin_x
+    safe_y1 = hy1 - margin_y
+    safe_y2 = hy2 + margin_y
+
     return (safe_x1 <= bcx <= safe_x2) and (safe_y1 <= bcy <= safe_y2)
 
 
 def get_players_in_ar_zone(
-    players: Dict[int, PlayerState], 
-    ar_zone_bbox: Tuple[float, float, float, float]
+    players: Dict[int, 'PlayerState'], 
+    ar_zone_bbox: BBox
 ) -> List[int]:
     """
-    Retourne les IDs des joueurs qui chevauchent la Bounding Box d'un élément AR.
-    (Valable pour un logo virtuel, une zone peinte (raquette), la ligne à 3 points, etc.)
-    Déclencheur pour allumer la segmentation corporelle des joueurs (SAM 2).
+    Retourne les IDs des joueurs qui chevauchent physiquement une zone 2D (ex: Logo AR).
+    Déclencheur pour allumer la segmentation corporelle des joueurs (Occlusion).
     """
     intersecting_ids = []
     zx1, zy1, zx2, zy2 = ar_zone_bbox
@@ -64,8 +92,7 @@ def get_players_in_ar_zone(
     for track_id, player in players.items():
         px1, py1, px2, py2 = player.bbox_px
         
-        # Test d'intersection AABB (Axis-Aligned Bounding Box) standard
-        # Les rectangles se croisent si l'un ne finit pas avant que l'autre commence
+        # Test d'intersection AABB (Axis-Aligned Bounding Box) optimisé
         overlap_x = (px1 <= zx2) and (px2 >= zx1)
         overlap_y = (py1 <= zy2) and (py2 >= zy1)
 
@@ -75,84 +102,78 @@ def get_players_in_ar_zone(
     return intersecting_ids
 
 
+# ===========================================================================
+# 2. DÉCLENCHEURS DE COMPORTEMENT
+# ===========================================================================
+
 def is_camera_stable(
-    current_hoop_bbox,
-    prev_hoop_bbox,
-    current_court_kp,
-    prev_court_kp,
+    current_hoop_bbox: Optional[BBox],
+    prev_hoop_bbox: Optional[BBox],
+    current_court_kp: Optional[np.ndarray],
+    prev_court_kp: Optional[np.ndarray],
     vid_w: int,
-    threshold_ratio: float = 0.05,
-    kp_threshold_ratio: float = 0.002  # 0.2% de la largeur de la vidéo
+    cfg: TriggersConfig = TriggersConfig()
 ) -> bool:
     """
-    Stratégie C (Validation Croisée) : 
-    1. Regarde le panier (Rapide).
-    2. Si le panier bouge, demande au sol de confirmer (Vérité Absolue).
+    Détermine si la caméra est fixe via une Validation Croisée à 2 niveaux :
+    1. Rapide : Vérifie si le panier (objet statique par excellence) a bougé.
+    2. Profond : Si le panier a bougé (ex: tremblement dû à un dunk), 
+       vérifie si le sol confirme ce mouvement.
     """
-    # ==========================================
-    # 1. TEST DU PANIER (Comportement classique)
-    # ==========================================
     hoop_stable = False
+    
+    # --- NIVEAU 1 : Le Panier ---
     if current_hoop_bbox is not None and prev_hoop_bbox is not None:
         cx_curr = (current_hoop_bbox[0] + current_hoop_bbox[2]) / 2.0
         cy_curr = (current_hoop_bbox[1] + current_hoop_bbox[3]) / 2.0
         cx_prev = (prev_hoop_bbox[0] + prev_hoop_bbox[2]) / 2.0
         cy_prev = (prev_hoop_bbox[1] + prev_hoop_bbox[3]) / 2.0
 
-        # Déplacement en ratio de la largeur de l'écran
-        dist_ratio = math.sqrt((cx_curr - cx_prev)**2 + (cy_curr - cy_prev)**2) / vid_w
+        dist_ratio = math.hypot(cx_curr - cx_prev, cy_curr - cy_prev) / vid_w
         
-        if dist_ratio <= threshold_ratio:
+        if dist_ratio <= cfg.cam_hoop_threshold_ratio:
             hoop_stable = True
     
-    # Si le panier dit que c'est stable, on le croit sur parole (Optimisation)
     if hoop_stable:
         return True
         
-    # ==========================================
-    # 2. TEST DU SOL (Validation Croisée)
-    # ==========================================
-    # Le panier a bougé ! Est-ce la caméra, ou juste la balle dans le filet ?
+    # --- NIVEAU 2 : Le Sol (Validation croisée) ---
+    # Le panier indique un mouvement. Est-ce un artefact (vibration physique) ou un vrai pan de caméra ?
     if current_court_kp is not None and prev_court_kp is not None:
-        # On s'assure de ne comparer que les points qui ont été trouvés (x > 0)
         valid_mask = (current_court_kp[:, 0] > 0) & (prev_court_kp[:, 0] > 0)
         
         if np.any(valid_mask):
             pts_curr = current_court_kp[valid_mask]
             pts_prev = prev_court_kp[valid_mask]
             
-            # Calcul du déplacement moyen de toutes les lignes du terrain
             distances = np.linalg.norm(pts_curr - pts_prev, axis=1)
-            mean_dist_ratio = np.mean(distances) / vid_w
+            mean_dist_ratio = float(np.mean(distances)) / vid_w
             
-            # Si le sol a bougé de moins de 0.2% de l'image, la caméra est fixe !
-            if mean_dist_ratio <= kp_threshold_ratio:
-                # Le filet nous mentait. On annule l'alerte.
+            # Si le sol n'a presque pas bougé, la caméra est considérée comme stable.
+            if mean_dist_ratio <= cfg.cam_floor_threshold_ratio:
                 return True 
 
-    # Si on arrive ici : le panier a bougé ET le sol a confirmé le mouvement
+    # Si les deux niveaux confirment le mouvement, la caméra bouge.
     return False
 
 
-def is_ball_falling(ball_history: list, window: int = 5, min_dy_px: float = 2.0) -> bool:
+def is_ball_falling(
+    ball_history: List[Tuple[int, float, float]], 
+    cfg: TriggersConfig = TriggersConfig()
+) -> bool:
     """
-    Analyse l'historique récent de la balle pour déterminer si elle est en phase 
-    descendante (chute vers le panier). L'axe Y augmente vers le bas de l'image.
-    
-    Args:
-        ball_history: Liste de tuples (frame_idx, cx, cy)
-        window: Nombre de frames à regarder en arrière pour lisser le bruit
-        min_dy_px: Seuil de descente minimum en pixels pour valider la chute
+    Analyse le vecteur vertical récent de la balle.
+    Utile pour distinguer un tir (balle qui descend vers l'arceau) 
+    d'une passe lobée (balle qui monte).
     """
-    # S'il n'y a pas assez d'historique, on accepte par défaut pour ne pas bloquer
-    if len(ball_history) < window:
+    if len(ball_history) < cfg.falling_window_frames:
         return False
         
-    # On extrait les coordonnées Y des X dernières frames
-    recent_y = [pos[2] for pos in ball_history[-window:]]
+    # Extraction des coordonnées Y (l'axe Y augmente vers le bas en OpenCV)
+    recent_y = [pos[2] for pos in ball_history[-cfg.falling_window_frames:]]
     
-    # Tendance : Y_actuel - Y_ancien
-    # Si dy > 0, la balle est plus basse sur l'écran qu'il y a 5 frames -> Elle tombe.
+    # Delta Y entre la position la plus ancienne de la fenêtre et la position courante
     dy = recent_y[-1] - recent_y[0]
     
-    return dy > min_dy_px
+    # Si dy est positif et supérieur au seuil, la balle tombe physiquement sur l'écran.
+    return dy > cfg.falling_min_dy_px
