@@ -1,27 +1,33 @@
 """
 tracking.py
 -----------
-Module de suivi (Tracking) avec Gap Filling.
-Prend les détections brutes de joueurs, utilise BotSort pour leur assigner
-un ID unique, projette leur position sur le terrain FIBA, et comble les
-disparitions temporaires (occlusion) via un buffer interne.
+Module de suivi spatial (Tracking) et de ré-identification (ReID).
+Gère l'association temporelle des Bounding Boxes (BotSort), la projection 
+orthographique sur le terrain (Homographie), et le comblement des 
+disparitions courtes (Gap Filling).
 """
 
 import logging
+from collections import deque
 from pathlib import Path
-from typing import List, Tuple
-from collections import deque 
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import cv2
 import numpy as np
 import torch
-
-from core.state import MatchState, PlayerState
-from core.filters import OneEuroFilter
-from core.track_supervisor import TrackSupervisor
 from boxmot.trackers.botsort.botsort import BotSort
 
+from core.state import MatchState, PlayerState
+
+if TYPE_CHECKING:
+    # Typage conditionnel pour éviter les imports circulaires si nécessaire à l'avenir
+    pass
+
 logger = logging.getLogger(__name__)
+
+# --- Alias de type ---
+BBox = Tuple[float, float, float, float]
+Detection = Tuple[float, float, float, float, float]
 
 
 # ===========================================================================
@@ -30,8 +36,8 @@ logger = logging.getLogger(__name__)
 
 def load_tracker(device: int = 0) -> BotSort:
     """
-    Initialise le tracker BotSort en mémoire.
-    À appeler une seule fois au démarrage dans run_pipeline.py.
+    Initialise le tracker BotSort (avec extracteur de features OSNet).
+    Configure un buffer personnalisé pour le Gap Filling métier.
     """
     logger.info("Chargement du tracker BotSort (ReID)...")
 
@@ -49,8 +55,8 @@ def load_tracker(device: int = 0) -> BotSort:
         match_thresh=0.80
     )
 
-    # Buffer personnalisé pour le Gap Filling
-    # Structure : { track_id: {"player": PlayerState, "lost_frames": int} }
+    # Buffer mémoire métier pour pallier les occlusions sévères (ex: poteau, arbitre)
+    # Format : { track_id: {"player": PlayerState, "lost_frames": int} }
     tracker.custom_lost_buffer = {}
 
     logger.info("Tracker prêt.")
@@ -58,13 +64,13 @@ def load_tracker(device: int = 0) -> BotSort:
 
 
 # ===========================================================================
-# UTILITAIRE DE PROJECTION
+# GÉOMÉTRIE ET PROJECTION
 # ===========================================================================
 
-def project_to_court(foot_x: float, foot_y: float, H_matrix: np.ndarray) -> Tuple[float, float]:
+def project_to_court(foot_x: float, foot_y: float, H_matrix: Optional[np.ndarray]) -> Optional[Tuple[float, float]]:
     """
-    Transforme des coordonnées pixels (image) en mètres (terrain FIBA)
-    via la matrice d'homographie. Retourne None si H est invalide.
+    Transforme une coordonnée pixel (Image) en coordonnée métrique (Terrain FIBA).
+    Retourne None si la matrice d'homographie est invalide ou absente.
     """
     if H_matrix is None:
         return None
@@ -75,31 +81,27 @@ def project_to_court(foot_x: float, foot_y: float, H_matrix: np.ndarray) -> Tupl
         point_m = cv2.perspectiveTransform(point_px, H_matrix)
         return (float(point_m[0, 0, 0]), float(point_m[0, 0, 1]))
     except Exception as e:
-        logger.debug(f"Erreur de projection : {e}")
+        logger.debug(f"Échec de la projection homographique : {e}")
         return None
 
 
 # ===========================================================================
-# MISE À JOUR DE L'ÉTAT (Par Frame)
+# MOTEUR DE TRACKING (FRAME PAR FRAME)
 # ===========================================================================
 
 def update_players_tracking(
     tracker: BotSort,
-    player_detections: List[Tuple[float, float, float, float, float]],
+    player_detections: List[Detection],
     frame: np.ndarray,
     state: MatchState,
     current_t: float,
-    team_detector = None,       # Référence au modèle GMM
-    supervisor = None,          # Instance du TrackSupervisor
-    max_lost_frames: int = 20   # ~200ms à 30fps
+    max_lost_frames: int = 20
 ) -> MatchState:
     """
-    Met à jour state.players avec les IDs et positions des joueurs.
-    Inclut le Gap Filling : un joueur perdu depuis moins de max_lost_frames
-    est conservé à sa dernière position connue (fantôme).
-    Conserve également l'historique cinématique des joueurs.
+    Associe les détections de la frame courante aux trajectoires existantes.
+    Maintient les joueurs disparus temporairement via le Gap Filling.
     """
-    # 1. Formatage pour BotSort : (N, 6) → [x1, y1, x2, y2, conf, class_id]
+    # 1. Formatage des entrées pour BotSort : [x1, y1, x2, y2, conf, class_id]
     if player_detections:
         dets_array = np.array(
             [[d[0], d[1], d[2], d[3], d[4], 0.0] for d in player_detections],
@@ -108,21 +110,13 @@ def update_players_tracking(
     else:
         dets_array = np.empty((0, 6), dtype=np.float32)
 
-    # 2. Mise à jour BotSort brute
+    # 2. Inférence de l'association (Kalman + OSNet)
     tracked_objects = tracker.update(dets_array, frame)
 
-    # =======================================================================
-    # SUPERVISION (Le Veto GMM)
-    # On filtre les résultats de BotSort avant de les injecter dans le State
-    # =======================================================================
-    if supervisor is not None and team_detector is not None and tracked_objects is not None:
-        tracked_objects = supervisor.apply_team_veto(tracked_objects, frame, state, team_detector)
-    # =======================================================================
-
-    new_players_dict = {}
+    new_players_dict: Dict[int, PlayerState] = {}
     active_ids = set()
 
-    # 3. Joueurs DÉTECTÉS cette frame
+    # 3. Traitement des joueurs activement détectés
     if tracked_objects is not None and len(tracked_objects) > 0:
         for t in tracked_objects:
             x1, y1, x2, y2 = t[:4]
@@ -137,61 +131,71 @@ def update_players_tracking(
             foot_y = float(y2)
             raw_court_pos = project_to_court(foot_x, foot_y, state.camera.H_matrix)
 
-            # --- RÉCUPÉRATION DE LA MÉMOIRE ---
+            # --- Transfert de la mémoire (État T-1 vers État T) ---
             if track_id in state.players:
-                old_history = state.players[track_id].pos_history_m
-                old_speed = state.players[track_id].speed_kmh
-                # NOUVEAU : On récupère notre historique brut dédié au dessin
-                raw_history = getattr(state.players[track_id], 'raw_history', deque(maxlen=40))
+                old_player = state.players[track_id]
+                pos_history_m = old_player.pos_history_m
+                raw_history = old_player.raw_history
+                speed_kmh = old_player.speed_kmh
+                
+                # Héritage des attributs gérés par les autres modules
+                team_id = old_player.team_id
+                gmm_history = old_player.gmm_history
             else:
-                old_history = deque(maxlen=30)
-                old_speed = 0.0
+                pos_history_m = deque(maxlen=30)
                 raw_history = deque(maxlen=40)
+                speed_kmh = 0.0
+                team_id = None
+                gmm_history = deque(maxlen=80)
 
-            # --- SAUVEGARDE BRUTE (Pour le lissage bidirectionnel) ---
-            final_court_pos = raw_court_pos
-            if final_court_pos is not None:
-                raw_history.append((state.frame_idx, final_court_pos[0], final_court_pos[1]))
+            # Enregistrement pour le lissage bidirectionnel (Look-Ahead)
+            if raw_court_pos is not None:
+                raw_history.append((state.frame_idx, raw_court_pos[0], raw_court_pos[1]))
 
+            # Instanciation stricte du nouvel état du joueur
             player = PlayerState(
                 track_id=track_id,
                 bbox_px=(float(x1), float(y1), float(x2), float(y2)),
                 foot_pos_px=(foot_x, foot_y),
-                court_pos_m=final_court_pos,
-                pos_history_m=old_history,  # Intact : laissé à disposition de compute_kinematics
-                speed_kmh=old_speed,
-                pos_filter=None 
+                court_pos_m=raw_court_pos,
+                team_id=team_id,
+                pos_history_m=pos_history_m,
+                raw_history=raw_history,
+                speed_kmh=speed_kmh,
+                gmm_history=gmm_history,
+                is_lost=False
             )
-            # On attache notre historique dynamiquement au joueur
-            player.raw_history = raw_history
 
             new_players_dict[track_id] = player
 
-            # Mise à jour du buffer (joueur visible → lost_frames remis à 0)
+            # Remise à zéro du compteur d'occlusion dans le buffer
             tracker.custom_lost_buffer[track_id] = {
                 "player": player,
                 "lost_frames": 0
             }
 
-    # 4. Joueurs PERDUS → Gap Filling
+    # 4. Traitement des disparitions (Gap Filling)
     ids_to_remove = []
 
     for tid, data in tracker.custom_lost_buffer.items():
         if tid in active_ids:
-            continue  # Déjà traité ci-dessus
+            continue
 
         data["lost_frames"] += 1
 
         if data["lost_frames"] <= max_lost_frames:
-            # On réinjecte le joueur à sa dernière position connue (fantôme)
-            new_players_dict[tid] = data["player"]
+            # Le joueur est "Fantôme" : on maintient sa dernière position connue
+            ghost_player = data["player"]
+            ghost_player.is_lost = True
+            new_players_dict[tid] = ghost_player
         else:
             ids_to_remove.append(tid)
 
+    # Nettoyage du buffer pour les disparitions définitives
     for tid in ids_to_remove:
         del tracker.custom_lost_buffer[tid]
 
-    # 5. Mise à jour de l'état global
+    # 5. Validation de la nouvelle topologie de la frame
     state.players = new_players_dict
 
     return state
