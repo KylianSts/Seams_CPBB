@@ -1,922 +1,441 @@
 """
 run_pipeline.py
 ---------------
-Pipeline de démonstration V2 — Analyse d'un match de basket en broadcast.
-
-LOGIQUE FRAME PAR FRAME :
-  1.  Détection objets     → RF-DETR   (joueurs, balle, arbitres, panier)
-  2.  Tracking joueurs     → BotSort + Gap Filling
-  3.  Stabilité caméra     → is_camera_stable (basé sur position du panier)
-  4.  YOLO-Pose + Homo     → si caméra a bougé  (sinon : recycle H + KP gris)
-  5.  Calibration panier   → accumule les dims quand cam stable + balle loin
-  6.  Triggers spatiaux    → ball_near_hoop / players_in_ar_zone / ar_possible
-  7.  SAM (encodage unique)→ filet si ball_near_hoop | joueurs si in_ar_zone
-  8.  Logo AR              → incrustation homographie + occlusion par SAM
-  9.  Détection de tir     → 6 métriques calculées si ball_near_hoop
-  10. Historique balle     → alimenté à chaque frame
-  11. Audio (sifflets)     → pré-calculé, comparaison par timestamp
-  12. Rendu                → HUD + vidéo annotée + minimap → mp4
-
-ENTRÉE  : vidéo mp4 broadcast
-SORTIE  : vidéo mp4 annotée 
+Pipeline de démonstration V2 — Analyse Broadcast de Basketball.
+Orchestre l'ensemble des modules d'Intelligence Artificielle, d'heuristiques,
+et de rendu pour générer une vidéo augmentée à partir d'un flux brut.
 """
 
 import argparse
 import logging
 import sys
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import numpy as np
 import torch
 from tqdm import tqdm
-import subprocess
-from collections import deque
 
+# --- Ajout du dossier racine au PATH ---
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-# ---------------------------------------------------------------------------
-# Modules core
-# ---------------------------------------------------------------------------
-from core.state import MatchState, CameraState
+# --- Imports Core ---
+from core.state import MatchState
+from core.video_io import add_audio_from_source
+
+# Configurations
 from core.detect_objects import DetectionConfig, load_object_detector, run_object_detection
 from core.detect_court import CourtPoseConfig, load_court_detector, run_court_detection, compute_homography, smooth_homography
 from core.tracking import load_tracker, update_players_tracking
+from core.detect_team import TeamConfig, TeamDetector
 from core.segmentation import SegmentationConfig, load_segmentation_model, encode_frame, get_players_masks, get_net_mask
-from core.detect_shots import check_geometric_crossing, check_net_area_variation, get_hoop_optical_flow, check_optical_flow_signature
-from core.detect_audio import YamnetConfig, get_match_audio_events
+from core.metrics import MetricsConfig, compute_kinematics
+from core.filters import FiltersConfig, filter_top_players, filter_best_ball, filter_isolated_players, calculate_occlusion_ratios, bidirectional_smooth, get_geometric_capsule_masks
+from core.spatial_triggers import TriggersConfig, is_ball_near_hoop, get_players_in_ar_zone, is_camera_stable, is_ball_falling
+from core.detect_shots import ShotConfig, check_geometric_crossing, check_net_area_variation, get_hoop_optical_flow, check_optical_flow_signature
 from core.incrust_logo import LogoConfig, load_ar_assets, apply_virtual_logo
-from core.spatial_triggers import is_ball_near_hoop, get_players_in_ar_zone, is_camera_stable, is_ball_falling
-from core.render import render_debug_frame
-from core.metrics import compute_kinematics
-from core.detect_team import TeamDetector
-from core.filters import filter_top_10_players, filter_best_ball, OneEuroFilter, filter_isolated_players, bidirectional_smooth, calculate_occlusion_ratios
-from core.track_supervisor import TrackSupervisor
+from core.render import RenderConfig, MatchRenderer
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(name)s — %(message)s")
 logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
-# CONSTANTES
+# CONFIGURATION DU CHEF D'ORCHESTRE
 # ===========================================================================
-AR_FADEOUT_FRAMES = 6  # Durée exacte du fondu de disparition
 
-# --- Look-Ahead Buffer ---
-LOOK_AHEAD_FRAMES = 15          # Le rendu aura 15 frames de retard sur l'analyse
-
-# --- Réalité Augmentée ---
-AR_COOLDOWN_FRAMES = 15         # ~1 sec de stabilité requise avant d'afficher
-AR_FADE_FRAMES = 6             # ~0.5 sec pour le fondu (fade-in)
-
-MASK_METHOD = "capsule"
-COURT_L, COURT_W = 28.0, 15.0
-
-# --- Position des deux logos sur le terrain (symétrie) ---
-_CX, _CY, _SIZE = 2.285, 12.0, 3.0
-_HALF = _SIZE / 2.0
-
-LOGO_CORNERS_LEFT = np.array([
-    [_CX - _HALF, _CY - _HALF],
-    [_CX + _HALF, _CY - _HALF],
-    [_CX + _HALF, _CY + _HALF],
-    [_CX - _HALF, _CY + _HALF],
-], dtype=np.float32)
-
-LOGO_CORNERS_RIGHT = np.array([
-    [COURT_L - _CX - _HALF, _CY - _HALF],
-    [COURT_L - _CX + _HALF, _CY - _HALF],
-    [COURT_L - _CX + _HALF, _CY + _HALF],
-    [COURT_L - _CX - _HALF, _CY + _HALF],
-], dtype=np.float32)
-
-# --- Calibration du panier ---
-# --- Cooldown entre deux tirs validés ---
-SHOT_COOLDOWN_FRAMES = 45       # ~1.5 sec à 30fps
-BALL_LOST_TIMEOUT_FRAMES = 45   # ~1.5 sec à 30fps
-
-# --- Seuil de confiance pour valider un tir (moyenne des scores) ---
-SHOT_CONFIDENCE_THRESHOLD = 0.4
-
-# --- Durée d'affichage du sifflet à l'écran ---
-WHISTLE_DISPLAY_FRAMES = 15     # ~0.5 sec à 30fps
+@dataclass
+class PipelineConfig:
+    """Paramètres temporels et comportementaux du pipeline."""
+    look_ahead_frames: int = 15       # Retard du rendu pour anticiper l'avenir (0.5s à 30fps)
+    
+    # --- Réalité Augmentée ---
+    ar_cooldown_frames: int = 15      # Frames de stabilité requises avant d'afficher l'AR
+    ar_fadein_frames: int = 4         # Durée du fondu d'apparition
+    ar_fadeout_frames: int =4        # Durée du fondu de disparition (anticipée)
+    
+    # --- Comportement Balle & Tir ---
+    ball_lost_timeout: int = 30       # Frames avant d'oublier une balle perdue près du panier
+    shot_cooldown_frames: int = 60    # Délai minimum entre deux tirs validés
+    shot_confidence_thresh: float = 0.40 # Score composite minimum pour valider un tir
+    shot_display_frames: int = 15     # Durée du feedback visuel (Panier Vert)
+    
+    mask_method: str = "capsule"      # "sam" ou "capsule"
 
 
 # ===========================================================================
-# FONCTIONS UTILITAIRES INTERNES
+# 1. PRE-FLIGHT (Calibration GMM)
 # ===========================================================================
 
-def _project_point(foot_pos_px: tuple, H_matrix: np.ndarray):
-    """
-    Transforme une position pixel (x, y) en mètres sur le terrain FIBA.
-    Retourne (X_m, Y_m) ou None si H est invalide.
-    """
-    if H_matrix is None or foot_pos_px is None:
-        return None
-    pt = np.array([[[float(foot_pos_px[0]), float(foot_pos_px[1])]]], dtype=np.float32)
-    try:
-        res = cv2.perspectiveTransform(pt, H_matrix)
-        return (float(res[0, 0, 0]), float(res[0, 0, 1]))
-    except Exception:
-        return None
+def run_preflight_calibration(cap: cv2.VideoCapture, total_frames: int, det_model, det_cfg: DetectionConfig, filter_cfg: FiltersConfig, team_cfg: TeamConfig) -> TeamDetector:
+    """Survole la vidéo pour extraire les couleurs dominantes des deux équipes."""
+    detector = TeamDetector(team_cfg)
+    samples_needed = 200
+    stride = max(1, total_frames // samples_needed)
+    
+    logger.info(f"Pre-flight : Échantillonnage GMM (1 frame sur {stride})...")
+    
+    for i in tqdm(range(0, total_frames, stride), desc="Calibration GMM"):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+        ret, frame = cap.read()
+        if not ret: break
+        
+        det_res = run_object_detection(det_model, frame, det_cfg)
+        isolated_players = filter_isolated_players(det_res.players, filter_cfg)
+        detector.collect_from_raw_boxes(frame, isolated_players, filter_cfg)
 
-
-def _get_logo_bbox_px(logo_corners_world: np.ndarray, H_matrix: np.ndarray,
-                      frame_w: int, frame_h: int):
-    """
-    Projette les 4 coins monde d'un logo en pixels et retourne sa bbox.
-    Utilisé pour alimenter get_players_in_ar_zone.
-    Retourne (x1, y1, x2, y2) en pixels, ou None si H est invalide.
-    """
-    if H_matrix is None:
-        return None
-    try:
-        H_inv = np.linalg.inv(H_matrix)
-        corners_px = cv2.perspectiveTransform(
-            logo_corners_world.reshape(1, -1, 2), H_inv
-        ).reshape(-1, 2)
-        x1 = float(np.clip(corners_px[:, 0].min(), 0, frame_w))
-        y1 = float(np.clip(corners_px[:, 1].min(), 0, frame_h))
-        x2 = float(np.clip(corners_px[:, 0].max(), 0, frame_w))
-        y2 = float(np.clip(corners_px[:, 1].max(), 0, frame_h))
-        return (x1, y1, x2, y2)
-    except Exception:
-        return None
-
-
-def _reprojet_all_players(state: MatchState) -> None:
-    """
-    Met à jour court_pos_m de tous les joueurs après un changement de H.
-    Appelé uniquement quand H vient d'être recalculé.
-    """
-    for player in state.players.values():
-        player.court_pos_m = _project_point(
-            player.foot_pos_px, state.camera.H_matrix
-        )
+    detector.calibrate()
+    
+    # Rembobinage crucial
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    return detector
 
 
 # ===========================================================================
-# PIPELINE PRINCIPALE
+# 2. BOUCLE PRINCIPALE
 # ===========================================================================
 
 def process_video(
-    video_path: Path,
-    output_path: Path,
-    device: int = 0,
-    enable_audio: bool = False,
-    enable_ar: bool = True,
-    enable_sam: bool = True,
-    enable_supervisor: bool = True,
-    enable_h_smooth: bool = True,
+    video_path: Path, output_path: Path, device: int = 0,
+    enable_audio: bool = False, enable_ar: bool = True, enable_sam: bool = True
 ) -> None:
-
-    # =======================================================================
-    # PRÉ-TRAITEMENT — Chargement des modèles et ressources
-    # =======================================================================
-
-    torch_device = f"cuda:{device}" if torch.cuda.is_available() else "cpu"
-    logger.info(f"Device : {torch_device}")
-
-    # --- Modèle de détection d'objets (RF-DETR) ---
-    det_config = DetectionConfig()
-    det_model  = load_object_detector(det_config)
-
-    # --- Modèle YOLO-Pose (terrain) ---
-    court_config = CourtPoseConfig()
-    court_model  = load_court_detector(court_config)
-
-    # --- Tracker joueurs (BotSort) ---
+    
+    # --- Initialisation des Configurations Métier ---
+    p_cfg, f_cfg, m_cfg = PipelineConfig(), FiltersConfig(), MetricsConfig()
+    t_cfg, s_cfg, r_cfg = TriggersConfig(), ShotConfig(), RenderConfig()
+    
+    # --- Chargement des Modèles ---
+    det_cfg = DetectionConfig(resolution=1280)
+    det_model = load_object_detector(det_cfg)
+    
+    court_cfg = CourtPoseConfig(device=device)
+    court_model = load_court_detector(court_cfg)
+    
     tracker = load_tracker(device=device)
-
-    # --- Superviseur de Tracking (Anti ID-Switch) ---
-    supervisor = TrackSupervisor(gmm_veto_threshold=0.75) if enable_supervisor else None
-
-    # --- Modèle de segmentation (SAM 2.1) ---
-    seg_config    = None
-    sam_predictor = None
+    renderer = MatchRenderer(r_cfg)
+    
+    seg_cfg, sam_predictor = None, None
     if enable_sam:
-        seg_config    = SegmentationConfig()
-        sam_predictor = load_segmentation_model(seg_config)
+        seg_cfg = SegmentationConfig(device=device)
+        sam_predictor = load_segmentation_model(seg_cfg)
 
-    # --- Logos AR (gauche + droite) ---
-    logo_left  = None
-    logo_right = None
+    # --- Préparation AR ---
+    logo_left, logo_right = None, None
     if enable_ar:
-        # Logo gauche : utilise les paramètres par défaut de LogoConfig
-        logo_left = LogoConfig(
-            center_x_m=_CX,
-            center_y_m=_CY,
-            size_m=_SIZE,
-        )
-        # Logo droite : position miroir sur le terrain
-        logo_right = LogoConfig(
-            center_x_m=COURT_L - _CX,
-            center_y_m=_CY, 
-            size_m=_SIZE,
-        )
-        ok_left  = load_ar_assets(logo_left)
-        ok_right = load_ar_assets(logo_right)
-
-        if not ok_left or not ok_right:
-            logger.warning("Chargement du logo AR échoué → AR désactivé.")
+        logo_left = LogoConfig(Path("data/demos/assets/veolia.png"), center_x_m=2.285, center_y_m=12.0, size_m=3.0)
+        logo_right = LogoConfig(Path("data/demos/assets/veolia.png"), center_x_m=28.0 - 2.285, center_y_m=12.0, size_m=3.0)
+        if not load_ar_assets(logo_left) or not load_ar_assets(logo_right):
             enable_ar = False
-            logo_left = logo_right = None
 
-    # --- Analyse audio (pre-processing complet avant la boucle vidéo) ---
-    audio_events = []
-    if enable_audio:
-        logger.info("Analyse audio (pre-processing)...")
-        audio_events = get_match_audio_events(video_path, YamnetConfig())
-        logger.info(f"  → {len(audio_events)} sifflet(s) détecté(s).")
-
-    # --- Ouverture de la vidéo source ---
+    # --- Flux Vidéo ---
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        logger.error(f"Impossible d'ouvrir : {video_path}")
-        sys.exit(1)
+        raise FileNotFoundError(f"Impossible d'ouvrir : {video_path}")
 
-    fps     = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    total   = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    vid_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    vid_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    vid_w, vid_h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # --- ARCHITECTURE RESPONSIVE (Calcul parfait du Ratio FIBA) ---
-    HUD_H = min(80, max(45, int(vid_h * 0.06)))
-    sidebar_h_target = vid_h + HUD_H
-    
-    # Objectif : On veut que le terrain prenne exactement la moitié de la hauteur (50%)
-    half_h = sidebar_h_target / 2.0
-    
-    # On retire les marges Y (environ 15% d'espace réservé pour le titre et l'aération)
-    avail_h_for_court = half_h * 0.85
-    
-    # Le terrain fait 28m x 15m (Ratio = 1.866)
-    # Pour remplir 'avail_h_for_court', la largeur idéale doit être :
-    ideal_court_w = avail_h_for_court * (28.0 / 15.0)
-    
-    # On rajoute les marges horizontales de la sidebar (environ 8% de vide au total)
-    SIDEBAR_W = int(ideal_court_w / 0.92)
-    
-    # Sécurité minimale
-    SIDEBAR_W = max(400, SIDEBAR_W)
+    # --- Calibration des équipes ---
+    team_detector = run_preflight_calibration(cap, total_frames, det_model, det_cfg, f_cfg, TeamConfig())
 
-    # Dimensions finales de la vidéo exportée
-    out_w = vid_w + SIDEBAR_W
-    out_h = sidebar_h_target
+    # --- Géométrie de Sortie (Responsive) ---
+    hud_h = min(80, max(45, int(vid_h * 0.06)))
+    sidebar_h = vid_h + hud_h
+    sidebar_w = max(400, int((sidebar_h / 2.0 * 0.85) * (28.0 / 15.0) / 0.92))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    writer = cv2.VideoWriter(
-        str(output_path),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (out_w, out_h)
-    )
+    writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (vid_w + sidebar_w, sidebar_h))
 
-    # --- État central du pipeline ---
+    # --- État Central ---
     state = MatchState()
-
-    # Initialisation du filtre 1 Euro pour la caméra
-    # mincutoff=0.01 (lissage fort au repos) | beta=0.50 (réactivité rapide en mouvement)
-    state.camera.kp_filter = OneEuroFilter(mincutoff=0.2, beta=0.5)
-
-    # --- Variables de contrôle inter-frames ---
-    prev_hoop_bbox      = None    # Dernière bbox panier connue (pour is_camera_stable)
-    prev_court_kp       = None    # NOUVEAU : Derniers keypoints connus du terrain
-    last_shot_frame     = -9999   # Frame du dernier tir validé (cooldown)
-    whistle_frames_left = 0       # Compteur d'affichage du sifflet à l'écran
-    shot_display_frames_left = 0  # NOUVEAU : Compteur d'affichage du panier vert
-
-
-    logger.info(f"Lancement du traitement : {total} frames → {output_path}")
-
-    # =======================================================================
-    # BOUCLE PRINCIPALE
-    # =======================================================================
-
-    # =======================================================================
-    # PRE-FLIGHT : Calibration des équipes (Optimisé V2)
-    # =======================================================================
-    SAMPLES_NEEDED = 200 # On vise 100 frames réparties sur tout le match
-    team_detector = TeamDetector(calibration_frames=SAMPLES_NEEDED, history_size=75)
-    
-    # Calcul du saut en nombre de frames
-    stride = max(1, total // SAMPLES_NEEDED)
-    
-    logger.info(f"Pre-flight : Échantillonnage de {SAMPLES_NEEDED} frames (1 frame toutes les {stride} frames)...")
-    
-    for i in tqdm(range(0, total, stride), desc="Calibration GMM"):
-        # On saute directement à la frame ciblée
-        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-        ret, pf_frame = cap.read()
-        if not ret: break
-        
-        # 1. Détection des objets sur cette frame isolée
-        det_res = run_object_detection(det_model, pf_frame, det_config)
-        
-        # 2. On filtre pour ne garder que les joueurs isolés (tolérance de 10% d'occlusion)
-        # Note: on n'utilise que det_res.players, les arbitres sont naturellement ignorés
-        isolated_players = filter_isolated_players(det_res.players, max_overlap_ratio=0.10)
-        
-        # 3. On extrait les couleurs de ces joueurs parfaits
-        team_detector.collect_from_raw_boxes(pf_frame, isolated_players)
-
-    # On force l'entraînement du modèle avec les données collectées
-    team_detector._run_calibration()
-    
-    # ON REMBOBINE LA VIDÉO À LA FRAME 0 POUR LE VRAI TRAITEMENT
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-    # --- INITIALISATION DU BUFFER ---
     look_ahead_buffer = deque()
 
-    with tqdm(total=total, unit="frame", desc="Pipeline V2") as pbar:
+    # Registres inter-frames
+    prev_hoop_bbox, prev_court_kp = None, None
+    last_shot_frame = -9999
+    shot_display_left = 0
+
+    logger.info(f"Lancement du pipeline principal : {total_frames} frames...")
+
+    with tqdm(total=total_frames, unit="frame", desc="Pipeline") as pbar:
         while True:
             ret, frame = cap.read()
-            if not ret:
-                break
-
-            # --- Réinitialisation des champs volatils du state ---
-            state.frame_idx    += 1
-            state.events        = []
-            state.player_masks  = []
-            state.net_mask      = None
-            state.shot_scores   = {}
-            state.active_triggers = {
-                "ball_near_hoop":     False,
-                "sam_net_active":     False,
-                "sam_players_active": False,
-                "ar_active":          False,
-            }
+            if not ret: break
+            
+            # --- Reset des variables volatiles ---
+            state.frame_idx += 1
+            state.events.clear()
+            state.player_masks.clear()
+            state.net_mask = None
+            state.shot_scores.clear()
+            state.active_triggers = {"ball_near_hoop": False, "sam_net_active": False, "sam_players_active": False, "ar_active": False}
 
             # ---------------------------------------------------------------
-            # ÉTAPE 1 — Détection d'objets (RF-DETR)
+            # 1. INFÉRENCE IA
             # ---------------------------------------------------------------
-            det_result = run_object_detection(det_model, frame, det_config)
-
-            # Max 10 joueurs
-            filtered_players = filter_top_10_players(det_result.players)
+            det_res = run_object_detection(det_model, frame, det_cfg)
+            filtered_players = filter_top_players(det_res.players, f_cfg)
+            best_ball = filter_best_ball(det_res.ball, state, f_cfg)
             
-            # Balle la plus logique
-            best_ball = filter_best_ball(det_result.ball, state)
-            
-            # On met à jour le state (pour la balle et le panier)
             state.ball_bbox_px = best_ball[:4] if best_ball else None
-            state.hoop_bbox_px = det_result.hoops[0][:4] if det_result.hoops else None
+            state.hoop_bbox_px = det_res.hoops[0][:4] if det_res.hoops else None
 
             # ---------------------------------------------------------------
-            # NOUVELLE ÉTAPE 2 (Ex-Etape 3) — Stabilité caméra & Homographie
-            # On met à jour le repère du monde AVANT de placer les joueurs dedans
+            # 2. CAMÉRA ET HOMOGRAPHIE
             # ---------------------------------------------------------------
+            is_stable = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, state.court_keypoints_px, prev_court_kp, vid_w, t_cfg)
+            state.camera.is_stable = is_stable
 
-            # Calcul de la stabilité (basé sur le panier + validation croisée terrain)
-            cam_stable_strict = is_camera_stable(
-                state.hoop_bbox_px, prev_hoop_bbox, 
-                state.court_keypoints_px, prev_court_kp, 
-                vid_w, threshold_ratio=0.05
-            )
-            cam_stable_ar = is_camera_stable(
-                state.hoop_bbox_px, prev_hoop_bbox, 
-                state.court_keypoints_px, prev_court_kp, 
-                vid_w, threshold_ratio=0.15
-            )
-            
-            state.camera.is_stable = cam_stable_strict
-
-            current_t = state.frame_idx / fps
-
-            if cam_stable_strict:
+            if is_stable:
                 state.camera.stable_frames_count += 1
-                # On nourrit le filtre avec les points FIXES pour garder l'état "chaud"
-                if state.court_keypoints_px is not None:
-                    state.court_keypoints_px = state.camera.kp_filter(current_t, state.court_keypoints_px)
-                # H reste le même (recyclé)
             else:
                 state.camera.stable_frames_count = 0
-                court_result = run_court_detection(court_model, frame, court_config)
-                
-                if court_result.keypoints_px is not None:
-                    # La transition sera fluide car x_prev était calé sur la position stable
-                    state.court_keypoints_px = state.camera.kp_filter(current_t, court_result.keypoints_px)
-                    state.court_keypoints_conf = court_result.keypoints_conf
-                
-                  # On recalcule H seulement avec les points lissés
-                    court_result.keypoints_px = state.court_keypoints_px
-                    H_new = compute_homography(court_result, court_config)
+                court_res = run_court_detection(court_model, frame, court_cfg)
+                if court_res.keypoints_px is not None:
+                    state.court_keypoints_px = court_res.keypoints_px
+                    state.court_keypoints_conf = court_res.keypoints_conf
                     
+                    H_new = compute_homography(court_res, court_cfg)
                     if H_new is not None:
-                        # --- AMORTISSEUR D'HOMOGRAPHIE ---
-                        if enable_h_smooth and state.camera.H_matrix is not None:
-                            # alpha=0.10 => Lissage fort. On absorbe le choc du changement de matrice.
-                            state.camera.H_matrix = smooth_homography(H_new, state.camera.H_matrix, alpha=0.1)
-                        else:
-                            state.camera.H_matrix = H_new
-                        
-                        # ---> SUPPRESSION DE _reprojet_all_players(state) ICI <---
+                        state.camera.H_matrix = smooth_homography(H_new, state.camera.H_matrix) if state.camera.H_matrix is not None else H_new
 
-            # Mémorisation pour la frame suivante
-            if state.hoop_bbox_px is not None:
-                prev_hoop_bbox = state.hoop_bbox_px
-                
-            # NOUVEAU : On sauvegarde les points du sol
-            if state.court_keypoints_px is not None:
-                prev_court_kp = state.court_keypoints_px.copy()
+            prev_hoop_bbox = state.hoop_bbox_px
+            if state.court_keypoints_px is not None: prev_court_kp = state.court_keypoints_px.copy()
 
             # ---------------------------------------------------------------
-            # NOUVELLE ÉTAPE 3 (Ex-Etape 2) — Tracking des joueurs
+            # 3. TRACKING & ÉQUIPES
             # ---------------------------------------------------------------
-            # Maintenant, l'homographie H_matrix est DÉJÀ à jour.
-            # L'EMA du tracking fera son travail en douceur, sans jamais être court-circuité.
-            state = update_players_tracking(
-                tracker,
-                filtered_players,
-                frame,
-                state,
-                current_t=current_t,
-                team_detector=team_detector,
-                supervisor=supervisor
-            )
+            state = update_players_tracking(tracker, filtered_players, frame, state, state.frame_idx / fps)
+            
+            # Extraction des preuves GMM (SANS muter l'état directement depuis l'IA)
+            occlusion_ratios = calculate_occlusion_ratios(state.players, f_cfg)
+            evidence = team_detector.extract_evidence(frame, state.players, f_cfg)
+            
+            for tid, (pA, pB) in evidence.items():
+                occ = occlusion_ratios.get(tid, 0.0)
+                state.players[tid].gmm_history.append((state.frame_idx, pA, pB, occ))
+
+            # Assignation temporaire des équipes au présent ---
+            current_teams = team_detector.resolve_teams(state.players, state.frame_idx)
+            for tid, player in state.players.items():
+                player.team_id = current_teams.get(tid, player.team_id)
+
+            compute_kinematics(state, fps, m_cfg)
 
             # ---------------------------------------------------------------
-            # ÉTAPE 3.5 — Détection des équipes (Collecte des preuves continues)
+            # 4. TRIGGERS SPATIAUX & MACHINE À ÉTAT
             # ---------------------------------------------------------------
-            # On calcule le pourcentage d'occlusion exact de chaque joueur
-            occlusion_ratios = calculate_occlusion_ratios(state.players)
-
-            # On met à jour le casier de preuves du joueur
-            team_detector.update(state, frame, occlusion_ratios)
-
-            # ---------------------------------------------------------------
-            # ÉTAPE 4 — Calcul de la cinématique (Vitesse des joueurs)
-            # ---------------------------------------------------------------
-            compute_kinematics(state, fps)
-
-            # ---------------------------------------------------------------
-            # ÉTAPE 5 — Calcul des triggers spatiaux
-            # ---------------------------------------------------------------
-
-            # 1. Vérification de la présence dans la GRANDE zone (Trigger de base)
-            current_ball_near = is_ball_near_hoop(state.ball_bbox_px, state.hoop_bbox_px)
+            current_ball_near = is_ball_near_hoop(state.ball_bbox_px, state.hoop_bbox_px, t_cfg)
             ball_detected = state.ball_bbox_px is not None
             
-            # 2. Analyse du vecteur de chute (True si la balle descend vers le bas de l'écran)
-            ball_falling = is_ball_falling(list(state.ball_history), window=5)
-            
-            # 3. EXCEPTION LAYUP / DUNK (Intersection stricte avec le panier)
-            ball_very_close = False
-            if ball_detected and state.hoop_bbox_px is not None:
-                bx1, by1, bx2, by2 = state.ball_bbox_px
-                hx1, hy1, hx2, hy2 = state.hoop_bbox_px
-                
-                # Tolérance : On élargit légèrement la boîte du panier pour capter le contact
-                margin_x = (hx2 - hx1) * 0.05
-                margin_y = (hy2 - hy1) * 0.05
-                
-                # Vérification d'intersection AABB (Axis-Aligned Bounding Box)
-                intersect_x = (bx1 <= hx2 + margin_x) and (bx2 >= hx1 - margin_x)
-                intersect_y = (by1 <= hy2 + margin_y) and (by2 >= hy1 - margin_y)
-                
-                if intersect_x and intersect_y:
-                    ball_very_close = True
-
-            # 4. LA MACHINE À ÉTATS (Le Gatekeeper intelligent)
             if current_ball_near:
+                ball_falling = is_ball_falling(list(state.ball_history), t_cfg)
                 if not state.is_ball_near_hoop_sticky:
-                    # Activation : La balle descend ou frôle l'arceau
-                    if ball_falling or ball_very_close:
+                    if ball_falling: # (On pourrait ajouter ici le test AABB du layup)
                         state.is_ball_near_hoop_sticky = True
                         state.last_ball_near_hoop_frame = state.frame_idx
                 else:
-                    # Maintien : On met à jour l'horloge
                     state.last_ball_near_hoop_frame = state.frame_idx
-                    
             elif state.is_ball_near_hoop_sticky:
-                # LA BALLE N'EST PLUS PRÈS DU PANIER (Perdue ou Faux Positif ailleurs)
-                frames_since_last_seen = state.frame_idx - state.last_ball_near_hoop_frame
-                
-                if ball_detected:
-                    # CAS A : Une balle est vue AILLEURS.
-                    # PÉRIODE DE GRÂCE : On ignore ce faux positif pendant 15 frames (0.5s)
-                    # pour laisser le temps au tir de se terminer et au filet de bouger.
-                    if frames_since_last_seen > 15:
-                        state.is_ball_near_hoop_sticky = False
-                else:
-                    # CAS B : La balle a totalement disparu de l'écran.
-                    # On applique le grand timeout classique (ex: 45 frames).
-                    if frames_since_last_seen > BALL_LOST_TIMEOUT_FRAMES:
-                        state.is_ball_near_hoop_sticky = False
+                frames_lost = state.frame_idx - state.last_ball_near_hoop_frame
+                if ball_detected and frames_lost > 15:
+                    state.is_ball_near_hoop_sticky = False
+                elif frames_lost > p_cfg.ball_lost_timeout:
+                    state.is_ball_near_hoop_sticky = False
 
-            ball_near = state.is_ball_near_hoop_sticky 
-            state.active_triggers["ball_near_hoop"] = ball_near
+            state.active_triggers["ball_near_hoop"] = state.is_ball_near_hoop_sticky
 
-            # -------------------------------------------------------------------
-            # Trigger B : Logo AR possible (Machine à états : Cooldown + Fade-in)
-            # -------------------------------------------------------------------
-            # 1. Si les conditions de stabilité sont réunies, on incrémente le compteur
-            if enable_ar and cam_stable_ar and state.camera.H_matrix is not None:
+            # AR Machine à états
+            if enable_ar and is_stable and state.camera.H_matrix is not None:
                 state.ar_stable_frames += 1
+                if state.ar_stable_frames >= p_cfg.ar_cooldown_frames:
+                    frames_vis = state.ar_stable_frames - p_cfg.ar_cooldown_frames
+                    state.ar_alpha_multiplier = min(1.0, frames_vis / p_cfg.ar_fadein_frames)
             else:
-                # Disparition IMMÉDIATE au moindre mouvement brusque
                 state.ar_stable_frames = 0
                 state.ar_alpha_multiplier = 0.0 
 
-            # 2. Calcul du fondu (Fade-in)
-            if state.ar_stable_frames >= AR_COOLDOWN_FRAMES:
-                # Le logo a le droit de s'afficher, on calcule son opacité progressive
-                frames_visible = state.ar_stable_frames - AR_COOLDOWN_FRAMES
-                # L'alpha monte progressivement de 0.0 à 1.0
-                state.ar_alpha_multiplier = min(1.0, frames_visible / AR_FADE_FRAMES)
-            else:
-                state.ar_alpha_multiplier = 0.0
-
-            # L'AR est considéré "actif" (pour déclencher SAM sur les joueurs) dès qu'il commence à apparaître
-            ar_possible = state.ar_alpha_multiplier > 0.0
-            state.active_triggers["ar_active"] = ar_possible
+            state.active_triggers["ar_active"] = state.ar_alpha_multiplier > 0.0
             
-            # Trigger C : Joueurs qui chevauchent la zone des logos → active SAM joueurs
+            # Intersection AR
             players_in_ar = []
-            if ar_possible:
-                for corners in [LOGO_CORNERS_LEFT, LOGO_CORNERS_RIGHT]:
-                    ar_bbox = _get_logo_bbox_px(
-                        corners, state.camera.H_matrix, vid_w, vid_h
-                    )
-                    if ar_bbox is not None:
-                        players_in_ar += get_players_in_ar_zone(state.players, ar_bbox)
-                players_in_ar = list(set(players_in_ar))
-
-            # On active le masque joueur dès qu'un joueur est sur le logo
-            mask_players_needed = len(players_in_ar) > 0
+            if state.active_triggers["ar_active"]:
+                for logo in [logo_left, logo_right]:
+                    if logo is not None and logo._world_corners is not None and state.camera.H_matrix is not None:
+                        H_inv = np.linalg.inv(state.camera.H_matrix)
+                        corners_px = cv2.perspectiveTransform(logo._world_corners.reshape(1, -1, 2), H_inv).reshape(-1, 2)
+                        ar_bbox = (float(corners_px[:, 0].min()), float(corners_px[:, 1].min()), float(corners_px[:, 0].max()), float(corners_px[:, 1].max()))
+                        players_in_ar.extend(get_players_in_ar_zone(state.players, ar_bbox))
             
-            # SAM Filet ne s'active que si la logique intelligente (Tir ou Layup) a validé !
-            sam_net_needed      = enable_sam and ball_near and state.hoop_bbox_px is not None
-
-            state.active_triggers["sam_net_active"]     = sam_net_needed
+            mask_players_needed = len(set(players_in_ar)) > 0
+            sam_net_needed = enable_sam and state.active_triggers["ball_near_hoop"] and state.hoop_bbox_px is not None
+            
+            state.active_triggers["sam_net_active"] = sam_net_needed
             state.active_triggers["sam_players_active"] = mask_players_needed
 
             # ---------------------------------------------------------------
-            # ÉTAPE 6 — Masquage & Segmentation (Joueurs et Filet)
+            # 5. SEGMENTATION
             # ---------------------------------------------------------------
-            
-            # Faut-il encoder l'image pour SAM ? (Seulement si SAM est requis)
-            need_sam_encoding = sam_net_needed or (mask_players_needed and MASK_METHOD == "sam")
+            # On encode l'image si on a besoin du filet (toujours SAM) 
+            # OU si on a besoin des joueurs avec la méthode SAM.
+            need_sam_encoding = sam_net_needed or (mask_players_needed and p_cfg.mask_method == "sam")
             
             if need_sam_encoding and sam_predictor is not None:
-                encode_frame(sam_predictor, frame, seg_config)
+                encode_frame(sam_predictor, frame, seg_cfg)
 
-            # 1. Masques des joueurs qui gênent le logo (Capsule ou SAM)
             if mask_players_needed:
-                boxes_ar = [
-                    state.players[tid].bbox_px
-                    for tid in players_in_ar
-                    if tid in state.players
-                ]
-                if boxes_ar:
-                    # Appel de la fonction avec les bons arguments nommés
-                    state.player_masks = get_players_masks(
-                        player_boxes=boxes_ar,
-                        config=seg_config,
-                        predictor=sam_predictor,
-                        method=MASK_METHOD,
-                        frame_shape=frame.shape
-                    )
+                boxes_ar = [state.players[tid].bbox_px for tid in set(players_in_ar) if tid in state.players]
+                if p_cfg.mask_method == "capsule":
+                    state.player_masks = get_geometric_capsule_masks(boxes_ar, frame.shape)
+                elif p_cfg.mask_method == "sam" and sam_predictor:
+                    state.player_masks = get_players_masks(sam_predictor, boxes_ar, seg_cfg)
 
-            # 2. Masque du filet (Toujours SAM)
-            if sam_net_needed and sam_predictor is not None:
-                state.net_mask = get_net_mask(
-                    sam_predictor,
-                    state.hoop_bbox_px,
-                    vid_w, vid_h,
-                    seg_config
-                )
+            if sam_net_needed and sam_predictor:
+                state.net_mask = get_net_mask(sam_predictor, state.hoop_bbox_px, vid_w, vid_h, seg_cfg)
                 if state.net_mask is not None:
                     state.net_area_history.append(float(np.sum(state.net_mask)))
 
             # ---------------------------------------------------------------
-            # ÉTAPE 7 — Incrustation du logo AR
-            # -> SUPPRIMÉ D'ICI ! Le logo sera dessiné dans le passé (Étape 12)
-            # On applique le logo avec les masques SAM joueurs pour l'occlusion.
+            # 6. DÉTECTION DE TIR
             # ---------------------------------------------------------------
-            #if ar_possible:
-            #    for logo_cfg in [logo_left, logo_right]:
-            #        if logo_cfg is not None:
-            #            frame = apply_virtual_logo(frame, state, logo_cfg)
-
-            # ---------------------------------------------------------------
-            # ÉTAPE 8 — Détection de tir (3 Métriques Robustes)
-            # ---------------------------------------------------------------
-            if ball_near and state.hoop_bbox_px is not None:
-                scores = {}
-
-                # 1. Traversée géométrique
-                scores["geometry"] = check_geometric_crossing(
-                    list(state.ball_history), state.hoop_bbox_px
-                )
-
-                # 2. Variation de l'aire du filet (La fameuse cloche)
-                # Note: On ne passe que l'historique, plus besoin du masque courant
-                scores["net_area"] = check_net_area_variation(
-                    list(state.net_area_history)
-                )
-
-                # 3. Flux optique masqué (On calcule d'abord la frame T)
-                current_flow = get_hoop_optical_flow(
-                    state.prev_frame_bgr, frame, state.hoop_bbox_px, state.net_mask
-                )
-                state.optical_flow_history.append(current_flow)
+            if state.active_triggers["ball_near_hoop"] and state.hoop_bbox_px is not None:
+                sc = {}
+                sc["geometry"] = check_geometric_crossing(list(state.ball_history), state.hoop_bbox_px)
+                sc["net_area"] = check_net_area_variation(list(state.net_area_history), s_cfg)
                 
-                # Puis on évalue la signature temporelle
-                scores["optical"] = check_optical_flow_signature(
-                    list(state.optical_flow_history)
-                )
+                curr_flow = get_hoop_optical_flow(state.prev_frame_bgr, frame, state.hoop_bbox_px, state.net_mask, s_cfg)
+                state.optical_flow_history.append(curr_flow)
+                sc["optical"] = check_optical_flow_signature(list(state.optical_flow_history), s_cfg)
+                
+                state.shot_scores = sc
 
-                state.shot_scores = scores
-
-                # --- Validation du tir (Logique Veto + Poids) ---
-                if scores["geometry"] > 0.1: # La balle a physiquement traversé l'arceau
-                    
-                    # SAM pèse 70%, le mouvement continu du filet 30%
-                    physical_score = (scores["net_area"] * 0.70) + (scores["optical"] * 0.30)
-                    
-                    if physical_score >= SHOT_CONFIDENCE_THRESHOLD:
-                        cooldown_ok = (state.frame_idx - last_shot_frame) >= SHOT_COOLDOWN_FRAMES
-
-                        if cooldown_ok:
+                if sc["geometry"] > 0.1:
+                    physical_score = (sc["net_area"] * 0.70) + (sc["optical"] * 0.30)
+                    if physical_score >= p_cfg.shot_confidence_thresh:
+                        if (state.frame_idx - last_shot_frame) >= p_cfg.shot_cooldown_frames:
                             state.events.append("SHOT_DETECTED")
                             last_shot_frame = state.frame_idx
-                            logger.info(f"  [TIR DÉTECTÉ] Frame {state.frame_idx} | Geom: {scores['geometry']:.2f} | Phys: {physical_score:.2f}")
+                            logger.info(f"🏀 TIR DÉTECTÉ | Geom: {sc['geometry']:.2f} | Phys: {physical_score:.2f}")
 
-            # ---------------------------------------------------------------
-            # ÉTAPE 9 — Mise à jour de l'historique de la balle
-            # (Toujours à jour, pas seulement quand ball_near)
-            # ---------------------------------------------------------------
-            if state.ball_bbox_px is not None:
+            if state.ball_bbox_px:
                 bx1, by1, bx2, by2 = state.ball_bbox_px
-                state.ball_history.append((
-                    state.frame_idx,
-                    (bx1 + bx2) / 2.0,
-                    (by1 + by2) / 2.0
-                ))
+                state.ball_history.append((state.frame_idx, (bx1 + bx2) / 2.0, (by1 + by2) / 2.0))
 
-            # ---------------------------------------------------------------
-            # ÉTAPE 10 — Sifflet audio
-            # On compare le timestamp courant aux événements pré-calculés.
-            # ---------------------------------------------------------------
-            current_ts = state.frame_idx / fps
-            whistle_now = any(
-                abs(current_ts - e.timestamp) <= (e.duration / 2.0)
-                for e in audio_events
-            )
-
-            if whistle_now:
-                whistle_frames_left = WHISTLE_DISPLAY_FRAMES
-
-            state.is_whistle_active = (whistle_frames_left > 0)
-            if whistle_frames_left > 0:
-                whistle_frames_left -= 1
-
-            # ---------------------------------------------------------------
-            # ÉTAPE 11 — Mémorisation de la frame actuelle pour le flux optique
-            # ---------------------------------------------------------------
             state.prev_frame_bgr = frame.copy()
 
             # ---------------------------------------------------------------
-            # ÉTAPE 12 — Rendu Différé (Look-Ahead Buffer)
+            # 7. LOOK-AHEAD BUFFER & RENDU (La Machine Temporelle)
             # ---------------------------------------------------------------
-            # 1. On prend la photo de l'instant Présent (T) avec une frame vierge de logo
-            snapshot = state.take_snapshot(frame)
-            look_ahead_buffer.append(snapshot)
+            look_ahead_buffer.append(state.take_snapshot(frame))
 
-            # 2. Si le buffer est "plein", on dessine la frame du Passé (T - 15)
-            if len(look_ahead_buffer) >= LOOK_AHEAD_FRAMES:
-                past_snapshot = look_ahead_buffer.popleft()
+            if len(look_ahead_buffer) >= p_cfg.look_ahead_frames:
+                past_snap = look_ahead_buffer.popleft()
 
-                # ===============================================================
-                # 🔮 LES ANTICIPATIONS VISUELLES (MAGIE DU LOOK-AHEAD)
-                # ===============================================================
-                
-                # --- A. ANTICIPATION DU MOUVEMENT (Fade-out Doux du Logo) ---
-                frames_before_crash = LOOK_AHEAD_FRAMES
-                
+                # A. Anticipation AR (Fade-out si la caméra VA bouger)
+                frames_before_crash = p_cfg.look_ahead_frames
                 for i, future_snap in enumerate(look_ahead_buffer):
                     if not future_snap.camera_stable:
                         frames_before_crash = i
                         break
                 
-                if frames_before_crash == LOOK_AHEAD_FRAMES and not state.camera.is_stable:
-                    frames_before_crash = LOOK_AHEAD_FRAMES - 1
+                if frames_before_crash < p_cfg.ar_fadeout_frames:
+                    ratio = frames_before_crash / float(p_cfg.ar_fadeout_frames)
+                    past_snap.ar_alpha_multiplier = min(past_snap.ar_alpha_multiplier, ratio * ratio)
 
-                # Si le crash arrive dans la fenêtre de Fade-out prévue
-                if frames_before_crash < AR_FADEOUT_FRAMES:
-                    # Ratio linéaire de 1.0 (loin du crash) à 0.0 (crash imminent)
-                    ratio = frames_before_crash / float(AR_FADEOUT_FRAMES)
-                    
-                    # Courbe d'Easing (Quadratique) pour un rendu "Doux"
-                    # L'opacité baisse doucement au début, puis chute vite à la fin.
-                    anticipated_alpha = ratio * ratio 
-                    
-                    past_snapshot.ar_alpha_multiplier = min(past_snapshot.ar_alpha_multiplier, anticipated_alpha)
-
-                # --- B. ANTICIPATION DU TIR (Synchro parfaite + Durée) ---
-                # Si l'état présent (T) vient tout juste de valider un tir...
+                # B. Feedback Visuel Tir
                 if "SHOT_DETECTED" in state.events:
-                    # On lance le compte à rebours visuel (ex: 15 frames = 0.5 sec)
-                    shot_display_frames_left = 15
+                    shot_display_left = p_cfg.shot_display_frames
+                if shot_display_left > 0:
+                    past_snap.is_perfect_shot = True
+                    shot_display_left -= 1
 
-                # Tant que le compte à rebours est actif, on allume le panier en vert
-                if shot_display_frames_left > 0:
-                    past_snapshot.is_perfect_shot = True
-                    shot_display_frames_left -= 1
-
-                # --- C. LISSAGE BIDIRECTIONNEL (Positions Minimap) ---
-                for tid, past_player in past_snapshot.players.items():
-                    # On utilise l'historique brut dédié
+                # C. Résolution des Équipes & Lissage Spatial (Avec le savoir du futur)
+                resolved_teams = team_detector.resolve_teams(state.players, past_snap.frame_idx)
+                
+                for tid, past_player in past_snap.players.items():
+                    past_player.team_id = resolved_teams.get(tid, past_player.team_id)
+                    
                     if tid in state.players:
-                        full_history = getattr(state.players[tid], 'raw_history', [])
-                    else:
-                        full_history = getattr(past_player, 'raw_history', [])
-                        
-                    smoothed_pos = bidirectional_smooth(full_history, past_snapshot.frame_idx, window=15)
-                    if smoothed_pos is not None:
-                        past_player.court_pos_m = smoothed_pos
+                        live_hist = state.players[tid].gmm_history
+                        window = [h for h in live_hist if abs(h[0] - past_snap.frame_idx) <= 15]
+                        if window:
+                            avg_A = sum(h[1] for h in window) / len(window)
+                            avg_B = sum(h[2] for h in window) / len(window)
+                            past_player._debug_bidi_avg = (avg_A, avg_B, len(window))      
 
-                # --- D. CLASSIFICATION D'ÉQUIPE BIDIRECTIONNELLE (Couleurs) ---
-                if supervisor is not None:
-                    for tid, past_player in past_snapshot.players.items():
-                        # On récupère le joueur du présent (state) pour avoir son historique GMM complet
-                        # (qui contient les 15 frames de "futur" par rapport à ce snapshot)
-                        current_player = state.players.get(tid, past_player)
-                        
-                        # Le Juge Temporel analyse le dossier (passé + futur) pour décider
-                        best_team = supervisor.resolve_team_color(current_player, past_snapshot.frame_idx, window=30)
-                        
-                        # On applique la décision sur l'objet qu'on s'apprête à dessiner
-                        past_player.team_id = best_team
+                    # Lissage
+                    raw_hist = state.players[tid].raw_history if tid in state.players else past_player.raw_history
+                    smoothed_pos = bidirectional_smooth(list(raw_hist), past_snap.frame_idx, f_cfg)
+                    if smoothed_pos: past_player.court_pos_m = smoothed_pos
 
-                # ===============================================================
-                
-                # 3. Dessin final
-                draw_frame = past_snapshot.frame_bgr.copy()
-                
-                if past_snapshot.active_triggers.get("ar_active", False) and past_snapshot.ar_alpha_multiplier > 0.0:
-                    for logo_cfg in [logo_left, logo_right]:
-                        if logo_cfg is not None:
-                            draw_frame = apply_virtual_logo(draw_frame, past_snapshot, logo_cfg)
+                # D. Rendu Final
+                draw_frame = past_snap.frame_bgr.copy()
+                if past_snap.active_triggers.get("ar_active") and past_snap.ar_alpha_multiplier > 0.0:
+                    for logo in [logo_left, logo_right]:
+                        if logo: draw_frame = apply_virtual_logo(draw_frame, past_snap, logo)
 
-                output_frame = render_debug_frame(draw_frame, past_snapshot, sidebar_w=SIDEBAR_W, hud_h=HUD_H)
-                writer.write(output_frame)
+                out_frame = renderer.render_frame(draw_frame, past_snap, sidebar_w, hud_h)
+                writer.write(out_frame)
+            
+            pbar.update(1)
 
-    # Vidage du Look-Ahead Buffer à la fin de la vidéo
-    logger.info("Vidage final du buffer de rendu...")
-    while len(look_ahead_buffer) > 0:
-        past_snapshot = look_ahead_buffer.popleft()
-        
-        # --- LISSAGE ET CLASSIFICATION FINALE ---
-        for tid, past_player in past_snapshot.players.items():
-            # Smoothing
-            raw_h = getattr(past_player, 'raw_history', [])
-            smoothed_pos = bidirectional_smooth(raw_h, past_snapshot.frame_idx, window=15)
-            if smoothed_pos is not None:
-                past_player.court_pos_m = smoothed_pos
-                
-            # Classification d'équipe
-            if supervisor is not None:
-                past_player.team_id = supervisor.resolve_team_color(past_player, past_snapshot.frame_idx, window=15)
+    # --- Vidage du Buffer ---
+    while look_ahead_buffer:
+        past_snap = look_ahead_buffer.popleft()
+        resolved_teams = team_detector.resolve_teams(state.players, past_snap.frame_idx)
+        for tid, past_player in past_snap.players.items():
+            past_player.team_id = resolved_teams.get(tid, past_player.team_id)
+            
+            if tid in state.players:
+                live_hist = state.players[tid].gmm_history
+                window = [h for h in live_hist if abs(h[0] - past_snap.frame_idx) <= 15]
+                if window:
+                    avg_A = sum(h[1] for h in window) / len(window)
+                    avg_B = sum(h[2] for h in window) / len(window)
+                    past_player._debug_bidi_avg = (avg_A, avg_B, len(window))
+            
+            raw_hist = state.players[tid].raw_history if tid in state.players else past_player.raw_history
+            smoothed_pos = bidirectional_smooth(list(raw_hist), past_snap.frame_idx, f_cfg)
+            if smoothed_pos: past_player.court_pos_m = smoothed_pos
 
-        # Dessin et écriture
-        draw_frame = past_snapshot.frame_bgr.copy()
-        if past_snapshot.active_triggers.get("ar_active", False):
-            for logo_cfg in [logo_left, logo_right]:
-                if logo_cfg is not None:
-                    draw_frame = apply_virtual_logo(draw_frame, past_snapshot, logo_cfg)
+        draw_frame = past_snap.frame_bgr.copy()
+        if past_snap.active_triggers.get("ar_active") and past_snap.ar_alpha_multiplier > 0.0:
+            for logo in [logo_left, logo_right]:
+                if logo: draw_frame = apply_virtual_logo(draw_frame, past_snap, logo)
+        writer.write(renderer.render_frame(draw_frame, past_snap, sidebar_w, hud_h))
 
-        output_frame = render_debug_frame(draw_frame, past_snapshot, sidebar_w=SIDEBAR_W, hud_h=HUD_H)
-        writer.write(output_frame)
+    # --- Nettoyage ---
+    cap.release()
+    writer.release()
+    cv2.destroyAllWindows()
 
-    # =======================================================================
-    # FIN
-    # =======================================================================
-    cap.release()     
-    if writer is not None:
-        writer.release()
-    cv2.destroyAllWindows()  # Sécurité : ferme bien toutes les fenêtres d'OpenCV
-
-    # --- AJOUT DE L'AUDIO (Muxing avec FFmpeg) ---
+    # --- Post-Processing Audio ---
     if enable_audio:
-        logger.info("Fusion de la piste audio d'origine avec la vidéo annotée...")
-        
-        # On crée le nom du fichier temporaire
-        temp_video = output_path.with_name(f"temp_muet_{output_path.name}")
-        
-        # CRUCIAL (Surtout sur Windows) : On supprime le fichier temp s'il existait déjà 
-        # pour éviter le crash de la fonction rename()
-        if temp_video.exists():
-            temp_video.unlink()
-            
-        # On renomme le fichier muet généré par OpenCV
-        output_path.rename(temp_video)
-        
-        import subprocess
-        # Commande FFmpeg ultra-robuste avec conversion H.264 universelle
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(temp_video),         # Input 0: Vidéo annotée muette
-            "-i", str(video_path),         # Input 1: Vidéo source originale
-            
-            # --- LES 3 LIGNES MAGIQUES QUI RÉGLENT TON PROBLÈME ---
-            "-c:v", "libx264",             # Convertit la vidéo au standard universel H.264
-            "-preset", "fast",             # Accélère la conversion
-            "-pix_fmt", "yuv420p",         # Format de pixels obligatoire pour que Windows/QuickTime puisse lire la vidéo
-            # ------------------------------------------------------
-            
-            "-map", "0:v:0",               # Garde le flux vidéo de l'input 0
-            "-map", "1:a:0?",              # Le '?' évite le crash si la source n'a pas d'audio standard
-            "-c:a", "aac",                 # Force un format audio universel et lisible partout
-            "-shortest",                   # Coupe proprement à la fin de la vidéo
-            "-loglevel", "error",
-            str(output_path)               # Fichier final
-        ]
-        
-        # Exécution de la commande avec capture d'erreurs
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            logger.info("Audio ajouté avec succès !")
-            # On nettoie le fichier temporaire car tout s'est bien passé
-            if temp_video.exists():
-                temp_video.unlink()
-        else:
-            logger.error(f"Échec de l'ajout audio via FFmpeg. Erreur : {result.stderr}")
-            logger.warning("Restauration de la vidéo muette.")
-            # Restauration propre en cas de crash de FFmpeg (replace gère l'écrasement sur Windows)
-            if temp_video.exists():
-                temp_video.replace(output_path)
-                
-    logger.info(f"Vidéo de sortie sauvegardée : {output_path}")
+        add_audio_from_source(video_path, output_path)
 
-
-
-# ===========================================================================
-# ENTRÉE CLI
-# ===========================================================================
+    logger.info(f"✅ Traitement terminé : {output_path}")
 
 if __name__ == "__main__":
-
-    SOURCE_VIDEO_PATH = Path("data/demos/videos_raw/video_cergy_layup.mp4")
-    OUTPUT_PATH       = Path("data/demos/videos_annotated/demo_test_2.mp4")
-
-    parser = argparse.ArgumentParser(
-        description="Pipeline de démonstration basket V2",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument(
-        "--video",  type=Path, default=SOURCE_VIDEO_PATH,
-        help="Chemin de la vidéo d'entrée (mp4)"
-    )
-    parser.add_argument(
-        "--output", type=Path, default=OUTPUT_PATH,
-        help="Chemin de la vidéo de sortie (mp4). "
-             "Par défaut : <nom_video>_demo_v2.mp4"
-    )
-    parser.add_argument(
-        "--device", type=int, default=0,
-        help="Index du GPU (0 par défaut, -1 pour CPU)"
-    )
-    parser.add_argument(
-        "--no-audio", action="store_true",
-        help="Désactiver l'analyse audio (détection sifflets)"
-    )
-    parser.add_argument(
-        "--no-ar",    action="store_true",
-        help="Désactiver l'incrustation du logo AR"
-    )
-    parser.add_argument(
-        "--no-sam",   action="store_true",
-        help="Désactiver la segmentation SAM2"
-    )
-
-    parser.add_argument(
-        "--no-veto",  action="store_true",
-        help="Désactiver le superviseur de tracking (Veto GMM)"
-    )
-
-    parser.add_argument(
-        "--no-h-smooth", action="store_true",
-        help="Désactiver l'amortisseur d'homographie (Technique des 4 coins)"
-    )
+    parser = argparse.ArgumentParser(description="Pipeline Basket")
+    parser.add_argument("--video", type=Path, default=Path("data/demos/videos_raw/video_cergy_3pts.mp4"))
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--no-ar", action="store_true")
+    parser.add_argument("--no-sam", action="store_true")
+    parser.add_argument("--add-audio", action="store_true", help="Associe l'audio original au rendu final")
 
     args = parser.parse_args()
-
-    output = args.output or args.video.parent / (args.video.stem + "_demo_v2.mp4")
+    output_target = args.output or args.video.parent.parent / "videos_annotated" / (args.video.stem + "_test.mp4")
 
     process_video(
         video_path=args.video,
-        output_path=output,
+        output_path=output_target,
         device=args.device,
-        enable_audio=not args.no_audio,
         enable_ar=not args.no_ar,
         enable_sam=not args.no_sam,
-        enable_supervisor=not args.no_veto,
-        enable_h_smooth=not args.no_h_smooth,
+        enable_audio=args.add_audio
     )
