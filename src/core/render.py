@@ -1,629 +1,526 @@
 """
 render.py
 ---------
-Moteur de rendu graphique (Debug V2).
-Prend le MatchState et dessine toutes les informations visuelles.
+Moteur de rendu graphique et d'interface utilisateur (UI).
+Assemble les détections, la minimap et le tableau de bord tactique
+en une seule image composite pour l'export vidéo.
 """
 
 import logging
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from core.filters import get_torso_box, FiltersConfig
+
 import cv2
 import numpy as np
-from core.state import MatchState
+
+if TYPE_CHECKING:
+    from core.state import MatchState, FrameSnapshot
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Charte graphique
-# ---------------------------------------------------------------------------
-C_PLAYER      = (255, 255, 0)      # Joueurs
-C_TEAM_A      = (50, 50, 255)
-C_TEAM_B      = (255, 255, 50)
-C_NO_TEAM     = (150, 150, 150)
-C_BALL        = (30, 200, 255)     # Balle
-C_HOOP        = (130, 60, 110)     # Panier
-C_KP_ACTIVE   = (0, 255, 0)        # Keypoints recalculés
-C_KP_RECYCLED = (150, 150, 150)    # Keypoints recyclés (cam stable)
-C_ZONE_ALPHA = 0.20 
-C_MASK_ALPHA = 0.35
-C_BG_DARK     = (15, 18, 22)
-C_COURT       = (28, 32, 38)
-C_LINE        = (180, 180, 190)
-C_OK          = (100, 255, 100)
-C_WARN        = (50, 150, 255)
-C_OFF         = (80, 80, 80)
+# ===========================================================================
+# 1. CONFIGURATION VISUELLE (Design System)
+# ===========================================================================
 
-FONT      = cv2.FONT_HERSHEY_SIMPLEX
-FONT_MONO = cv2.FONT_HERSHEY_DUPLEX
+@dataclass
+class RenderConfig:
+    """Charte graphique et paramètres de rendu globaux (Couleurs BGR)."""
+    
+    # --- Couleurs des Entités ---
+    color_team_a: Tuple[int, int, int] = (50, 50, 255)     # Rouge
+    color_team_b: Tuple[int, int, int] = (255, 255, 50)    # Cyan
+    color_no_team: Tuple[int, int, int] = (150, 150, 150)  # Gris
+    color_ball: Tuple[int, int, int] = (30, 200, 255)      # Jaune/Orange
+    color_hoop: Tuple[int, int, int] = (130, 60, 110)      # Violet foncé
+    
+    # --- Couleurs de l'Interface (HUD / Sidebar) ---
+    color_bg_dark: Tuple[int, int, int] = (15, 18, 22)
+    color_court_bg: Tuple[int, int, int] = (28, 32, 38)
+    color_lines: Tuple[int, int, int] = (180, 180, 190)
+    color_text_main: Tuple[int, int, int] = (240, 240, 245)
+    color_text_sub: Tuple[int, int, int] = (160, 160, 170)
+    
+    # --- Couleurs de Statut ---
+    color_ok: Tuple[int, int, int] = (100, 255, 100)       # Vert
+    color_warn: Tuple[int, int, int] = (50, 150, 255)      # Orange
+    color_off: Tuple[int, int, int] = (80, 80, 80)         # Gris sombre
+    color_kp_active: Tuple[int, int, int] = (0, 255, 0)
+    color_kp_recycled: Tuple[int, int, int] = (150, 150, 150)
+    
+    # --- Polices et Transparence ---
+    font_main: int = cv2.FONT_HERSHEY_SIMPLEX
+    font_mono: int = cv2.FONT_HERSHEY_DUPLEX
+    alpha_zone: float = 0.20
+    alpha_mask: float = 0.35
+    
+    # --- Géométrie FIBA ---
+    court_length_m: float = 28.0
+    court_width_m: float = 15.0
+    min_kp_confidence: float = 0.50
 
-COURT_L, COURT_W = 28.0, 15.0   # Dimensions terrain FIBA en mètres
-CONF_KP_DISPLAY  = 0.50          # Seuil minimum pour afficher un keypoint
+    # --- Options d'affichage (Toggles) ---
+    show_player_text: bool = True
+    show_player_masks: bool = False
+    show_torso_debug: bool = True
 
 
 # ===========================================================================
-# 1. ANNOTATION DE LA VIDÉO PRINCIPALE
+# 2. ANNOTATEUR VIDÉO (Surcouche Terrain)
 # ===========================================================================
 
-def draw_detections(frame: np.ndarray, state: MatchState, txt_hoop: bool = False, txt_player: bool = False, show_team_crop: bool = False) -> np.ndarray:
-    """Dessine les BBoxes des joueurs, de la balle et du panier."""
-    out = frame.copy()
+class VideoAnnotator:
+    """Gère le dessin direct sur les pixels de la caméra (BBoxes, Masques, Keypoints)."""
+    
+    def __init__(self, cfg: RenderConfig):
+        self.cfg = cfg
 
-    # Panier
-    if state.hoop_bbox_px:
-        x1, y1, x2, y2 = map(int, state.hoop_bbox_px)
-        
-        # --- NOUVEAU : Effet Visuel Anticipé ---
-        # Si c'est la frame exacte du tir parfait, on flashe en vert
-        is_shot = getattr(state, 'is_perfect_shot', False)
-        box_color = C_OK if is_shot else C_HOOP
-        box_thick = 3 if is_shot else 1
-        
-        cv2.rectangle(out, (x1, y1), (x2, y2), box_color, box_thick, cv2.LINE_AA)
+    def draw_detections(self, frame: np.ndarray, state: 'FrameSnapshot') -> np.ndarray:
+        """Trace les Bounding Boxes des joueurs, de la balle et du panier."""
+        out = frame.copy()
 
-    # Balle
-    if state.ball_bbox_px:
-        x1, y1, x2, y2 = map(int, state.ball_bbox_px)
-        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-        cv2.circle(out, (cx, cy), 11, C_BALL, 2, cv2.LINE_AA)
-        cv2.circle(out, (cx, cy),  7, C_BALL, -1, cv2.LINE_AA)
+        # 1. Panier (avec effet de feedback visuel si tir parfait)
+        if state.hoop_bbox_px:
+            x1, y1, x2, y2 = map(int, state.hoop_bbox_px)
+            color = self.cfg.color_ok if state.is_perfect_shot else self.cfg.color_hoop
+            thickness = 3 if state.is_perfect_shot else 1
+            cv2.rectangle(out, (x1, y1), (x2, y2), color, thickness, cv2.LINE_AA)
 
-    # Joueurs
-    for track_id, player in state.players.items():
-        # Sélection de la couleur selon l'équipe
-        if player.team_id == 0:
-            color = C_TEAM_A   # Rouge
-        elif player.team_id == 1:
-            color = C_TEAM_B  # Cyan
-        else:
-            color = C_NO_TEAM # Gris (calibration)
-        
-        x1, y1, x2, y2 = map(int, player.bbox_px)
-        cv2.rectangle(out, (x1, y1), (x2, y2), color, 1, cv2.LINE_AA)
+        # 2. Balle
+        if state.ball_bbox_px:
+            x1, y1, x2, y2 = map(int, state.ball_bbox_px)
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            cv2.circle(out, (cx, cy), 11, self.cfg.color_ball, 2, cv2.LINE_AA)
+            cv2.circle(out, (cx, cy), 7, self.cfg.color_ball, -1, cv2.LINE_AA)
 
-        if show_team_crop:
-            w, h = x2 - x1, y2 - y1
-            # Ratios identiques à ceux de detect_team.py
-            cx1 = x1 + int(w * 0.25)
-            cy1 = y1 + int(h * 0.20)
-            cx2 = x2 - int(w * 0.25)
-            cy2 = y2 - int(h * 0.40)
-            # On dessine un rectangle blanc très fin à l'intérieur
-            cv2.rectangle(out, (cx1, cy1), (cx2, cy2), (255, 255, 255), 1, cv2.LINE_4)
+        # 3. Joueurs
+        for track_id, player in state.players.items():
+            if player.team_id == 0:
+                color = self.cfg.color_team_a
+            elif player.team_id == 1:
+                color = self.cfg.color_team_b
+            else:
+                color = self.cfg.color_no_team
+            
+            x1, y1, x2, y2 = map(int, player.bbox_px)
+            cv2.rectangle(out, (x1, y1), (x2, y2), color, 1, cv2.LINE_AA)
 
-        if txt_player:
-            label = f"ID:{track_id}"
-            (tw, th), _ = cv2.getTextSize(label, FONT, 0.4, 1)
-            cv2.rectangle(out, (x1, y1 - th - 4), (x1 + tw + 2, y1), color, -1)
-            cv2.putText(out, label, (x1 + 1, y1 - 2), FONT, 0.4, (0, 0, 0), 1, cv2.LINE_AA)
+            if getattr(self.cfg, 'show_torso_debug', False):
+                    try:
+                        tx1, ty1, tx2, ty2 = get_torso_box(player.bbox_px, FiltersConfig())
+                        cv2.rectangle(out, (int(tx1), int(ty1)), (int(tx2), int(ty2)), (255, 255, 255), 2, cv2.LINE_AA)
+                    except Exception as e:
+                        print(f"Erreur dessin torse ID {track_id} : {e}")
 
-    return out
+            # Label ID et Debug GMM
+            if self.cfg.show_player_text:
+                lines = [f"ID:{track_id}"]
+                
+                # Extraction des données GMM de la frame courante
+                if player.gmm_history:
+                    # On prend la dernière prédiction instantanée de la frame
+                    _, pA, pB, occ = player.gmm_history[-1]
+                    lines.append(f"A:{pA*100:.0f}% | B:{pB*100:.0f}% | Occ:{occ*100:.0f}%")
+                    
+                    # Affichage de la VRAIE moyenne bidirectionnelle calculée par le pipeline
+                    if hasattr(player, '_debug_bidi_avg'):
+                        avg_A, avg_B, w_len = player._debug_bidi_avg
+                        lines.append(f"Moy: A:{avg_A*100:.0f}% | B:{avg_B*100:.0f}%")
 
-def draw_zones_and_masks(frame: np.ndarray, state: MatchState, margin_ratio: float, mask_palyer: bool = True, mask_net: bool = True) -> np.ndarray:
-    """
-    Dessine :
-    - La zone de sécurité (trigger) avec sa propre transparence.
-    - Les masques SAM avec leur propre transparence.
-    - Les keypoints du terrain.
-    """
-    out = frame.copy()
-    h_img, w_img = frame.shape[:2]
+                # Dessin du texte multi-lignes (de bas en haut)
+                y_offset = int(y1) - 4
+                for line in reversed(lines):
+                    (tw, th), _ = cv2.getTextSize(line, self.cfg.font_main, 0.4, 1)
+                    
+                    cv2.rectangle(out, (int(x1), y_offset - th - 4), (int(x1) + tw + 4, y_offset + 2), color, -1)
+                    
+                    txt_color = (0, 0, 0) if player.team_id == 1 else (255, 255, 255)
+                    if player.team_id is None: txt_color = (0, 0, 0)
+                        
+                    cv2.putText(out, line, (int(x1) + 2, y_offset - 2), self.cfg.font_main, 0.4, txt_color, 1, cv2.LINE_AA)
+                    
+                    y_offset -= (th + 6)
+        return out
 
-    # ---------------------------------------------------------
-    # 1. COUCHE ZONE DE SÉCURITÉ (Trigger Panier)
-    # ---------------------------------------------------------
-    if state.hoop_bbox_px:
-        overlay_zone = out.copy()
-        hx1, hy1, hx2, hy2 = state.hoop_bbox_px
-        w_h, h_h = hx2 - hx1, hy2 - hy1
-        sx1 = int(max(0, hx1 - (w_h * margin_ratio)))
-        sy1 = int(max(0, hy1 - (h_h * margin_ratio)))
-        sx2 = int(min(w_img, hx2 + (w_h * margin_ratio)))
-        sy2 = int(min(h_img, hy2 + (h_h * margin_ratio)))
-        
-        cv2.rectangle(overlay_zone, (sx1, sy1), (sx2, sy2), C_HOOP, -1)
-        
-        # Fusion immédiate avec la transparence dédiée à la zone (C_ZONE_ALPHA)
-        cv2.addWeighted(overlay_zone, C_ZONE_ALPHA, out, 1.0 - C_ZONE_ALPHA, 0, out)
+    def draw_overlays(self, frame: np.ndarray, state: 'FrameSnapshot') -> np.ndarray:
+        """Applique les calques semi-transparents (Masques SAM) et les keypoints."""
+        out = frame.copy()
+        overlay = out.copy()
+        masks_drawn = False
 
-    # ---------------------------------------------------------
-    # 2. COUCHE MASQUES SAM (Joueurs & Filet)
-    # ---------------------------------------------------------
-    overlay_masks = out.copy()
-    masks_drawn = False
-
-    # Masques joueurs
-    if mask_palyer:
-        if state.player_masks:
+        # 1. Masques des joueurs
+        if state.player_masks and self.cfg.show_player_masks:
             combined = np.zeros(frame.shape[:2], dtype=bool)
             for mask in state.player_masks:
                 if mask.shape == combined.shape:
-                    combined |= mask
-            overlay_masks[combined] = C_PLAYER
+                    # Conversion à la volée si le masque est un float (méthode capsule)
+                    # On considère comme True tout pixel ayant un peu d'opacité (> 0.05)
+                    current_mask = mask if mask.dtype == bool else (mask > 0.05)
+                    combined |= current_mask
+                    
+            overlay[combined] = self.cfg.color_no_team
             masks_drawn = True
 
-    # Masque filet
-    if mask_net:
+        # 2. Masque du filet
         if state.net_mask is not None and state.net_mask.shape == frame.shape[:2]:
-            overlay_masks[state.net_mask] = C_HOOP
+            overlay[state.net_mask] = self.cfg.color_hoop
             masks_drawn = True
 
-    # Fusion avec la transparence dédiée aux masques (C_MASK_ALPHA)
-    if masks_drawn:
-        cv2.addWeighted(overlay_masks, C_MASK_ALPHA, out, 1.0 - C_MASK_ALPHA, 0, out)
+        if masks_drawn:
+            cv2.addWeighted(overlay, self.cfg.alpha_mask, out, 1.0 - self.cfg.alpha_mask, 0, out)
 
-    # ---------------------------------------------------------
-    # 3. COUCHE KEYPOINTS (Pas de transparence)
-    # ---------------------------------------------------------
-    if state.court_keypoints_px is not None:
-        conf = state.court_keypoints_conf
+        # 3. Keypoints du terrain (YOLO-Pose)
+        if state.court_keypoints_px is not None:
+            conf = state.court_keypoints_conf
+            color = self.cfg.color_kp_recycled if state.camera_stable else self.cfg.color_kp_active
+
+            for i, kp in enumerate(state.court_keypoints_px):
+                kx, ky = int(kp[0]), int(kp[1])
+                if kx == 0 and ky == 0:
+                    continue
+                if conf is not None and i < len(conf) and conf[i] < self.cfg.min_kp_confidence:
+                    continue
+                cv2.circle(out, (kx, ky), 5, (0, 0, 0), -1, cv2.LINE_AA)
+                cv2.circle(out, (kx, ky), 4, color, -1, cv2.LINE_AA)
+
+        return out
+
+
+# ===========================================================================
+# 3. MOTEUR DU HEAD-UP DISPLAY (Barre Supérieure)
+# ===========================================================================
+
+class HudRenderer:
+    """Génère le bandeau supérieur de télémétrie et statuts de l'IA."""
+    
+    def __init__(self, cfg: RenderConfig):
+        self.cfg = cfg
+
+    def _draw_sparkline(self, img: np.ndarray, history: List[float], x: int, y: int, w: int, h: int, color: Tuple[int, int, int]) -> None:
+        """Trace un graphique linéaire temporel miniature."""
+        if len(history) < 2:
+            return
         
-        # Utilisation de la bonne variable de stabilité selon les modifs précédentes
-        cam_stable = state.camera_stable
-        color = C_KP_RECYCLED if cam_stable else C_KP_ACTIVE
+        cv2.rectangle(img, (x, y), (x + w, y + h), (20, 20, 25), -1)
+        cv2.rectangle(img, (x, y), (x + w, y + h), (60, 60, 70), 1)
 
-        for i, kp in enumerate(state.court_keypoints_px):
-            kx, ky = int(kp[0]), int(kp[1])
-            if kx == 0 and ky == 0:
+        max_val = max(history) if max(history) > 0 else 1.0
+        max_val *= 1.2 
+
+        points = []
+        for i, v in enumerate(history):
+            px = x + int(i * (w / (len(history) - 1)))
+            py = y + h - int((v / max_val) * h)
+            points.append((px, py))
+
+        for i in range(len(points) - 1):
+            cv2.line(img, points[i], points[i+1], color, 1, cv2.LINE_AA)
+
+    def render(self, width: int, height: int, state: 'FrameSnapshot') -> np.ndarray:
+        """Construit le HUD avec un layout responsive."""
+        hud = np.full((height, width, 3), self.cfg.color_bg_dark, dtype=np.uint8)
+        cv2.line(hud, (0, height - 1), (width, height - 1), (60, 60, 70), 1)
+
+        # Échelle responsive
+        sf = height / 55.0  
+        f_main, f_sub = 0.45 * sf, 0.40 * sf
+        y_center = int(34 * sf)
+        gap = int(15 * sf)
+
+        def put_txt(x_pos: int, text: str, color: Tuple[int, int, int]) -> int:
+            cv2.putText(hud, text, (int(x_pos), y_center), self.cfg.font_mono, f_main, color, 1, cv2.LINE_AA)
+            return x_pos + cv2.getTextSize(text, self.cfg.font_mono, f_main, 1)[0][0] + int(12 * sf)
+
+        # --- GAUCHE : État des Triggers ---
+        cx = gap
+        trig = state.active_triggers
+        
+        cx = put_txt(cx, "CAM:STABLE" if state.camera_stable else "CAM:MOVING", self.cfg.color_ok if state.camera_stable else self.cfg.color_warn)
+        cx = put_txt(cx, "SAM:ON" if trig.get("sam_net_active") or trig.get("sam_players_active") else "SAM:OFF", self.cfg.color_ok if (trig.get("sam_net_active") or trig.get("sam_players_active")) else self.cfg.color_off)
+        cx = put_txt(cx, "AR:ON" if trig.get("ar_active") else "AR:OFF", self.cfg.color_ok if trig.get("ar_active") else self.cfg.color_off)
+
+        # --- DROITE : Télémétrie de Tir (Alignée à droite) ---
+        scores = state.shot_scores
+        y_txt, y_graph = int(22 * sf), int(28 * sf)
+        gw, gh = int(60 * sf), int(20 * sf)
+        
+        cx_right = width - gap
+
+        def put_metric(label: str, val: float, history: List[float]):
+            nonlocal cx_right
+            color = self.cfg.color_off if val == 0.0 else (self.cfg.color_ok if val >= 0.40 else (200, 200, 200))
+            cx_right -= (gw + gap)
+            
+            txt = f"{label}:{val:.2f}"
+            cv2.putText(hud, txt, (cx_right, y_txt), self.cfg.font_mono, f_sub, color, 1, cv2.LINE_AA)
+            if history:
+                self._draw_sparkline(hud, history, cx_right, y_graph, gw, gh, color)
+
+        # Tracé des métriques de tir en partant de la droite
+        put_metric("OPTI", scores.get("optical", 0.0), state.optical_flow_history)
+        put_metric("NET_", scores.get("net_area", 0.0), state.net_area_history)
+        
+        # Geometrie (Sans graphe)
+        val_geom = scores.get("geometry", 0.0)
+        c_geom = self.cfg.color_ok if val_geom >= 0.40 else (self.cfg.color_off if val_geom == 0.0 else (200, 200, 200))
+        txt_geom = f"GEOM:{val_geom:.2f}"
+        tw_geom = cv2.getTextSize(txt_geom, self.cfg.font_mono, f_sub, 1)[0][0]
+        
+        cx_right -= (tw_geom + gap)
+        cv2.putText(hud, txt_geom, (cx_right, y_center), self.cfg.font_mono, f_sub, c_geom, 1, cv2.LINE_AA)
+
+        # Label de section
+        shot_lbl = "SHOT TELEMETRY"
+        tw_lbl = cv2.getTextSize(shot_lbl, self.cfg.font_mono, f_main, 1)[0][0]
+        cx_right -= (tw_lbl + gap * 2)
+        cv2.putText(hud, shot_lbl, (cx_right, y_center), self.cfg.font_mono, f_main, self.cfg.color_text_main, 1, cv2.LINE_AA)
+
+        return hud
+
+
+# ===========================================================================
+# 4. MOTEUR DE LA SIDEBAR (Minimap & Dashboard)
+# ===========================================================================
+
+class SidebarRenderer:
+    """Génère le panneau latéral contenant la projection 2D et les statistiques tactiques."""
+    
+    def __init__(self, cfg: RenderConfig):
+        self.cfg = cfg
+
+    def render(self, width: int, height: int, state: 'FrameSnapshot') -> np.ndarray:
+        sidebar = np.full((height, width, 3), self.cfg.color_bg_dark, dtype=np.uint8)
+        sf = width / 900.0  
+        
+        mg_x, mg_y = int(width * 0.04), int(height * 0.03)
+        half_h = height // 2
+
+        # 1. Construction de la Minimap (Moitié supérieure)
+        self._draw_minimap(sidebar, state, width, half_h, mg_x, mg_y, sf)
+
+        # 2. Construction du Dashboard (Moitié inférieure)
+        dash_y = half_h + int(20 * sf)
+        self._draw_dashboard(sidebar, state, width, dash_y, mg_x, sf)
+
+        # Ligne de séparation verticale
+        cv2.line(sidebar, (0, 0), (0, height), (60, 60, 70), max(1, int(2 * sf)))
+        
+        return sidebar
+
+    def _draw_minimap(self, canvas: np.ndarray, state: 'FrameSnapshot', w: int, h: int, mg_x: int, mg_y: int, sf: float) -> None:
+        title_space = int(40 * sf)
+        avail_w, avail_h = w - (mg_x * 2), h - (mg_y * 2) - title_space
+
+        sc_w = avail_w / self.cfg.court_length_m
+        sc_h = avail_h / self.cfg.court_width_m
+        sc = min(sc_w, sc_h)
+
+        court_w_px = int(self.cfg.court_length_m * sc)
+        court_h_px = int(self.cfg.court_width_m * sc)
+
+        off_x = mg_x + (avail_w - court_w_px) // 2
+        off_y = mg_y + title_space
+
+        cv2.rectangle(canvas, (off_x, off_y), (off_x + court_w_px, off_y + court_h_px), self.cfg.color_court_bg, -1)
+
+        def c2px(x_m: float, y_m: float) -> Tuple[int, int]:
+            return int(x_m * sc) + off_x, int(y_m * sc) + off_y
+
+        def pline(pts, closed=False):
+            pts_px = np.array([c2px(p[0], p[1]) for p in pts], dtype=np.int32)
+            cv2.polylines(canvas, [pts_px.reshape(-1, 1, 2)], closed, self.cfg.color_lines, lw, cv2.LINE_AA)
+
+        lw = max(1, round(sc * 0.035))
+        
+        # --- LIGNES DU TERRAIN FIBA COMPLET ---
+        pline([[0, 0], [28, 0], [28, 15], [0, 15]], closed=True) # Bordures
+        pline([[14.0, 0.0], [14.0, 15.0]]) # Ligne médiane
+        cv2.circle(canvas, c2px(14.0, 7.5), int(1.8 * sc), self.cfg.color_lines, lw, cv2.LINE_AA) # Rond central
+        
+        pline([[0, 5.05], [5.8, 5.05], [5.8, 9.95], [0, 9.95]], closed=True) # Raquette Gauche
+        pline([[28.0, 5.05], [22.2, 5.05], [22.2, 9.95], [28.0, 9.95]], closed=True) # Raquette Droite
+        
+        cv2.circle(canvas, c2px(5.8, 7.5), int(1.8 * sc), self.cfg.color_lines, lw, cv2.LINE_AA) # Lancer franc gauche
+        cv2.circle(canvas, c2px(22.2, 7.5), int(1.8 * sc), self.cfg.color_lines, lw, cv2.LINE_AA) # Lancer franc droite
+        
+        # Lignes à 3 points
+        arc_angles = np.linspace(-1.36, 1.36, 25)
+        arc_left = [[1.575 + 6.75 * np.cos(a), 7.5 + 6.75 * np.sin(a)] for a in arc_angles]
+        line_3pt_left = [[0.0, 0.9], [2.99, 0.9]] + arc_left + [[2.99, 14.1], [0.0, 14.1]]
+        pline(line_3pt_left)
+        line_3pt_right = [[28.0 - p[0], p[1]] for p in line_3pt_left]
+        pline(line_3pt_right)
+        
+        # Arceaux et Planches
+        pline([[1.2, 6.9], [1.2, 8.1]])
+        pline([[26.8, 6.9], [26.8, 8.1]])
+        cv2.circle(canvas, c2px(1.575, 7.5), max(2, int(0.225 * sc)), self.cfg.color_lines, lw, cv2.LINE_AA)
+        cv2.circle(canvas, c2px(26.425, 7.5), max(2, int(0.225 * sc)), self.cfg.color_lines, lw, cv2.LINE_AA)
+
+        # --- FLÈCHE D'ATTAQUE ---
+        if state.attacking_team_id is not None and state.target_hoop is not None:
+            center_x = off_x + (court_w_px // 2)
+            arrow_y = off_y + court_h_px + int(18 * sf)
+            
+            is_attacking_right = (state.target_hoop[0] > 14.0)
+            dir_sign = 1 if is_attacking_right else -1
+            color = self.cfg.color_team_a if state.attacking_team_id == 0 else self.cfg.color_team_b
+            
+            s_4, s_6, s_10, s_18, s_24 = int(4*sf), int(6*sf), int(10*sf), int(18*sf), int(24*sf)
+            
+            pts = np.array([
+                [center_x - s_18 * dir_sign, arrow_y - s_4], 
+                [center_x + s_6 * dir_sign,  arrow_y - s_4], 
+                [center_x + s_6 * dir_sign,  arrow_y - s_10],
+                [center_x + s_24 * dir_sign, arrow_y],       
+                [center_x + s_6 * dir_sign,  arrow_y + s_10],
+                [center_x + s_6 * dir_sign,  arrow_y + s_4], 
+                [center_x - s_18 * dir_sign, arrow_y + s_4]  
+            ], np.int32)
+            
+            pts_shadow = pts.copy()
+            pts_shadow[:, 1] += max(1, int(2 * sf)) 
+            cv2.fillPoly(canvas, [pts_shadow], (20, 20, 25), cv2.LINE_AA)
+            cv2.fillPoly(canvas, [pts], color, cv2.LINE_AA)
+
+        # --- JOUEURS ---
+        dot_r = max(4, int(sc * 0.45))
+        halo_th = max(1, int(2 * sf))
+        
+        for tid, player in state.players.items():
+            if player.court_pos_m is None:
                 continue
-            if conf is not None and i < len(conf) and conf[i] < CONF_KP_DISPLAY:
-                continue
-            cv2.circle(out, (kx, ky), 5, (0, 0, 0), -1, cv2.LINE_AA)
-            cv2.circle(out, (kx, ky), 4, color,     -1, cv2.LINE_AA)
+            
+            px, py = c2px(max(0.0, min(self.cfg.court_length_m, player.court_pos_m[0])), 
+                          max(0.0, min(self.cfg.court_width_m, player.court_pos_m[1])))
 
-    return out
+            color = self.cfg.color_team_a if player.team_id == 0 else (self.cfg.color_team_b if player.team_id == 1 else self.cfg.color_no_team)
 
+            cv2.circle(canvas, (px, py), dot_r, color, -1, cv2.LINE_AA)
+            cv2.circle(canvas, (px, py), dot_r, (255, 255, 255), halo_th, cv2.LINE_AA)
+
+            if player.is_open:
+                angle_start = (state.frame_idx * 10) % 360
+                cv2.ellipse(canvas, (px, py), (dot_r + int(5*sf), dot_r + int(5*sf)), 
+                            0, angle_start, angle_start + 180, self.cfg.color_ok, halo_th, cv2.LINE_AA)
+
+    def _draw_dashboard(self, canvas: np.ndarray, state: 'FrameSnapshot', w: int, start_y: int, mg_x: int, sf: float) -> None:
+        cv2.line(canvas, (0, start_y), (w, start_y), (80, 80, 90), max(1, int(2 * sf)))
+        
+        # Colonnes ajustées pour faire de la place à la colonne DIFF.
+        col_lbl = mg_x
+        col_a   = int(w * 0.32)
+        col_b   = int(w * 0.50)
+        col_all = int(w * 0.68)
+        col_dif = int(w * 0.85)
+        
+        f_sub = 0.40 * sf
+        y_curr = start_y + int(30 * sf)
+        
+        cv2.putText(canvas, "METRIQUE", (col_lbl, y_curr), self.cfg.font_mono, f_sub, self.cfg.color_text_sub, 1, cv2.LINE_AA)
+        cv2.putText(canvas, "EQUIPE A", (col_a, y_curr), self.cfg.font_mono, f_sub, self.cfg.color_team_a, 1, cv2.LINE_AA)
+        cv2.putText(canvas, "EQUIPE B", (col_b, y_curr), self.cfg.font_mono, f_sub, self.cfg.color_team_b, 1, cv2.LINE_AA)
+        cv2.putText(canvas, "MATCH", (col_all, y_curr), self.cfg.font_mono, f_sub, self.cfg.color_text_main, 1, cv2.LINE_AA)
+        cv2.putText(canvas, "DIFF.", (col_dif, y_curr), self.cfg.font_mono, f_sub, self.cfg.color_warn, 1, cv2.LINE_AA)
+        
+        cv2.line(canvas, (mg_x, y_curr + int(15 * sf)), (w - mg_x, y_curr + int(15 * sf)), (50, 50, 60), 1)
+        y_curr += int(40 * sf)
+
+        def draw_section(title: str, y: int) -> int:
+            cv2.putText(canvas, title.upper(), (mg_x, y), self.cfg.font_mono, 0.45 * sf, self.cfg.color_text_sub, 1, cv2.LINE_AA)
+            cv2.line(canvas, (mg_x, y + int(10 * sf)), (mg_x + int(100 * sf), y + int(10 * sf)), self.cfg.color_warn, max(1, int(2 * sf)))
+            return y + int(35 * sf)
+
+        def row(label: str, v_a: float, v_b: float, v_all: float, y: int, unit: str = "", sub: bool = False) -> int:
+            f_scale = 0.35 * sf if sub else f_sub
+            c_lbl = (160, 160, 170) if sub else (230, 230, 240)
+            c_val = (130, 130, 140) if sub else (255, 255, 255)
+            ind = int(25 * sf) if sub else 0
+            
+            fmt = "{:.1f}" if "m/s2" in unit else "{:.0f}" 
+            diff_val = (v_a - v_b)
+            diff_fmt = round(diff_val, 1) if "m/s2" in unit else round(diff_val)
+            diff_color = (80, 80, 90) if abs(diff_fmt) == 0 else self.cfg.color_warn
+            
+            cv2.putText(canvas, label, (col_lbl + ind, y), self.cfg.font_mono, f_scale, c_lbl, 1, cv2.LINE_AA)
+            cv2.putText(canvas, f"{fmt.format(v_a)}{unit}", (col_a, y), self.cfg.font_mono, f_scale, c_val, 1, cv2.LINE_AA)
+            cv2.putText(canvas, f"{fmt.format(v_b)}{unit}", (col_b, y), self.cfg.font_mono, f_scale, c_val, 1, cv2.LINE_AA)
+            cv2.putText(canvas, f"{fmt.format(v_all)}{unit}", (col_all, y), self.cfg.font_mono, f_scale, c_val, 1, cv2.LINE_AA)
+            
+            if not sub:
+                cv2.putText(canvas, f"{'+' if diff_fmt > 0 else ''}{diff_fmt}", (col_dif, y), self.cfg.font_mono, f_scale, diff_color, 1, cv2.LINE_AA)
+
+            return y + int((25 if sub else 40) * sf)
+
+        m_a, m_b = state.team_metrics.get(0, {}), state.team_metrics.get(1, {})
+
+        y_curr = draw_section("Performance Athletique", y_curr)
+        y_curr = row("Vitesse Moy.", m_a.get("avg_speed", 0), m_b.get("avg_speed", 0), state.avg_speed_kmh, y_curr, " km/h")
+        y_curr = row("Ecart-type", m_a.get("std_speed", 0), m_b.get("std_speed", 0), state.std_speed_kmh, y_curr, " km/h", True)
+        y_curr = row("Vitesse Min", m_a.get("min_speed", 0), m_b.get("min_speed", 0), state.min_speed_kmh, y_curr, " km/h", True)
+        y_curr = row("Vitesse Max", m_a.get("max_speed", 0), m_b.get("max_speed", 0), state.max_speed_kmh, y_curr, " km/h", True)
+        
+        y_curr += int(10 * sf)
+        y_curr = row("Accel. Moy.", m_a.get("avg_accel", 0), m_b.get("avg_accel", 0), state.avg_accel_ms2, y_curr, " m/s2")
+        y_curr = row("Ecart-type", m_a.get("std_accel", 0), m_b.get("std_accel", 0), state.std_accel_ms2, y_curr, " m/s2", True)
+        y_curr = row("Accel. Min", m_a.get("min_accel", 0), m_b.get("min_accel", 0), state.min_accel_ms2, y_curr, " m/s2", True)
+        y_curr = row("Accel. Max", m_a.get("max_accel", 0), m_b.get("max_accel", 0), state.max_accel_ms2, y_curr, " m/s2", True)
+        
+        y_curr += int(20 * sf)
+        y_curr = draw_section("Placement & Spatialisation", y_curr)
+        y_curr = row("Spacing (Aire)", m_a.get("spacing", 0), m_b.get("spacing", 0), 0, y_curr, " m2")
+        y_curr = row("Dans Raquette", m_a.get("paint_count", 0), m_b.get("paint_count", 0), m_a.get("paint_count", 0) + m_b.get("paint_count", 0), y_curr, " jou.")
+
+        y_curr += int(25 * sf)
+
+        total_paint = m_a.get("paint_count", 0) + m_b.get("paint_count", 0)
+        alert_active = total_paint > 4
+        
+        alert_bg = (20, 20, 25)
+        alert_border = self.cfg.color_warn if alert_active else (60, 60, 70)
+        
+        cv2.rectangle(canvas, (mg_x, y_curr), (w - mg_x, y_curr + int(45 * sf)), alert_bg, -1)
+        cv2.rectangle(canvas, (mg_x, y_curr), (w - mg_x, y_curr + int(45 * sf)), alert_border, 1)
+
+        alert_txt = f"CHARGES RAQUETTES : {int(total_paint)} JOUEURS"
+        if alert_active:
+            alert_txt += " | ALERTE REBOND"
+            
+        text_color = self.cfg.color_ok if not alert_active else self.cfg.color_warn
+        cv2.putText(canvas, alert_txt, (mg_x + int(20 * sf), y_curr + int(28 * sf)), self.cfg.font_mono, f_sub, text_color, 1, cv2.LINE_AA)
 
 # ===========================================================================
-# 2. BANDEAU SUPÉRIEUR (HUD)
+# 5. ORCHESTRATEUR PRINCIPAL
 # ===========================================================================
 
-def draw_sparkline(img: np.ndarray, history: list, x: int, y: int, w: int, h: int, color: tuple):
-    """Dessine un mini-graphique temporel (sparkline) d'un signal."""
-    if len(history) < 2:
-        return
+class MatchRenderer:
+    """Chef d'orchestre assemblant les différentes couches visuelles de l'application."""
     
-    # Fond du graphe (semi-transparent sombre) avec bordure
-    cv2.rectangle(img, (x, y), (x + w, y + h), (20, 20, 25), -1)
-    cv2.rectangle(img, (x, y), (x + w, y + h), (60, 60, 70), 1)
+    def __init__(self, config: RenderConfig = RenderConfig()):
+        self.config = config
+        self.video_annotator = VideoAnnotator(config)
+        self.hud_renderer = HudRenderer(config)
+        self.sidebar_renderer = SidebarRenderer(config)
 
-    vals = list(history)
-    max_val = max(vals) if max(vals) > 0 else 1.0
-    # On ajoute une marge de 20% pour ne pas que la courbe touche le plafond
-    max_val *= 1.2 
+    def render_frame(self, frame: np.ndarray, state: 'FrameSnapshot', sidebar_w: int, hud_h: int) -> np.ndarray:
+        """Assemble la vidéo annotée, le HUD et la Sidebar en une seule frame de sortie."""
+        h, w = frame.shape[:2]
 
-    points = []
-    for i, v in enumerate(vals):
-        px = x + int(i * (w / (len(history) - 1)))
-        # Calcul Y (inversé car 0 est en haut sur l'image)
-        py = y + h - int((v / max_val) * h)
-        points.append((px, py))
+        # 1. Traitement de la vidéo principale
+        main_view = self.video_annotator.draw_overlays(frame, state)
+        main_view = self.video_annotator.draw_detections(main_view, state)
 
-    # Dessin de la ligne reliant les points
-    for i in range(len(points) - 1):
-        cv2.line(img, points[i], points[i+1], color, 1, cv2.LINE_AA)
+        # 2. Rendu des panneaux d'interface
+        hud_view = self.hud_renderer.render(w, hud_h, state)
+        sidebar_view = self.sidebar_renderer.render(sidebar_w, h + hud_h, state)
 
-def build_top_hud(total_width: int, hud_h: int, state: MatchState) -> np.ndarray:
-    """
-    Génère le bandeau de debug supérieur en 3 zones (Responsive) :
-    Gauche : Indicateurs d'activation (CAM, SAM, AR)
-    Milieu : Métriques de tir (SHOT) + Graphes
-    Droite : Détections audio (WHISTLE, CROWD)
-    """
-    hud = np.full((hud_h, total_width, 3), C_BG_DARK, dtype=np.uint8)
-    cv2.line(hud, (0, hud_h - 1), (total_width, hud_h - 1), (60, 60, 70), 1)
+        # 3. Assemblage spatial (Stack vertical pour le bloc gauche, horizontal pour le final)
+        left_pane = np.vstack([hud_view, main_view])
+        final_frame = np.hstack([left_pane, sidebar_view])
 
-    # --- MISE À L'ÉCHELLE DYNAMIQUE ---
-    scale_factor = hud_h / 55.0  
+        return final_frame
 
-    f_main = 0.45 * scale_factor
-    f_sub = 0.40 * scale_factor
-    
-    y_center = int(34 * scale_factor) # Ligne de base du texte pour les zones Gauche et Droite
-    y_text = int(22 * scale_factor)   # On remonte le texte pour faire la place au graphe
-    y_graph = int(28 * scale_factor)  # Position Y du coin haut-gauche du graphe
-    graph_w = int(60 * scale_factor)  # Largeur de la fenêtre du graphe
-    graph_h = int(20 * scale_factor)  # Hauteur de la fenêtre du graphe
-
-    # Marges adaptatives
-    gap_main = int(15 * scale_factor)
-    gap_small = int(8 * scale_factor)
-    gap_tiny = int(6 * scale_factor)
-    # -------------------------------------------------------------
-
-    trig = state.active_triggers
-
-    def put(img, text, x, color):
-        """Écrit du texte et retourne la nouvelle position X (dessin de gauche à droite)."""
-        cv2.putText(img, text, (int(x), y_center), FONT_MONO, f_main, color, 1, cv2.LINE_AA)
-        return x + cv2.getTextSize(text, FONT_MONO, f_main, 1)[0][0] + int(12 * scale_factor)
-
-    # ==========================================
-    # 1. INDICATEURS D'ACTIVATION (Zone Gauche)
-    # ==========================================
-    cursor = gap_main
-
-    # Stabilité caméra
-    cam_ok = state.camera_stable
-    cursor = put(hud, "CAM:STABLE" if cam_ok else "CAM:MOVING", cursor, C_OK if cam_ok else C_WARN)
-    put(hud, "|", cursor - gap_tiny, C_OFF)
-    cursor += gap_small
-
-    # SAM Filet
-    sam_net = trig.get("sam_net_active", False)
-    cursor = put(hud, "SAM-NET:ON" if sam_net else "SAM-NET:OFF", cursor, C_OK if sam_net else C_OFF)
-    put(hud, "|", cursor - gap_tiny, C_OFF)
-    cursor += gap_small
-
-    # SAM Joueurs
-    sam_ply = trig.get("sam_players_active", False)
-    cursor = put(hud, "SAM-PLY:ON" if sam_ply else "SAM-PLY:OFF", cursor, C_OK if sam_ply else C_OFF)
-    put(hud, "|", cursor - gap_tiny, C_OFF)
-    cursor += gap_small
-
-    # Logo AR
-    ar_ok = trig.get("ar_active", False)
-    put(hud, "AR:ON" if ar_ok else "AR:OFF", cursor, C_OK if ar_ok else C_OFF)
-
-    # ==========================================
-    # 2. MÉTRIQUES DE TIR (Zone Milieu)
-    # ==========================================
-    scores = state.shot_scores if state.shot_scores else {}
-    
-    # On positionne ce bloc pour qu'il finisse aux 2/3 de l'écran (dessin de droite à gauche)
-    cursor_mid = int((2 * total_width / 3) + (20 * scale_factor))
-    
-    def put_metric_with_graph(label: str, val: float, history: list):
-        """Helper pour dessiner le texte et le graphe en reculant le curseur."""
-        nonlocal cursor_mid
-        
-        # Détermination de la couleur selon le score
-        if val == 0.0:
-            color = C_OFF
-        elif val >= 0.40:
-            color = C_OK
-        else:
-            color = (200, 200, 200)
-
-        # On recule le curseur de la largeur de l'élément
-        cursor_mid -= (graph_w + gap_main)
-        
-        # Dessin du texte en haut
-        txt = f"{label}:{val:.2f}"
-        cv2.putText(hud, txt, (cursor_mid, y_text), FONT_MONO, f_sub, color, 1, cv2.LINE_AA)
-        
-        # Dessin du graphe en bas
-        if history:
-            draw_sparkline(hud, list(history), cursor_mid, y_graph, graph_w, graph_h, color)
-
-    # --- 1. OPTICAL FLOW (Avec Graphe) ---
-    put_metric_with_graph("OPTI", scores.get("optical", 0.0), getattr(state, 'optical_flow_history', []))
-
-    # --- 2. NET AREA (Avec Graphe) ---
-    put_metric_with_graph("NET_", scores.get("net_area", 0.0), getattr(state, 'net_area_history', []))
-
-    # --- 3. GEOMETRY (Sans Graphe, juste du texte) ---
-    val_geom = scores.get("geometry", 0.0)
-    c_geom = C_OK if val_geom >= 0.40 else (C_OFF if val_geom == 0.0 else (200, 200, 200))
-    txt_geom = f"GEOM:{val_geom:.2f}"
-    
-    tw_geom = cv2.getTextSize(txt_geom, FONT_MONO, f_sub, 1)[0][0]
-    cursor_mid -= (tw_geom + gap_main)
-    # On le centre verticalement car il n'a pas de graphe en dessous
-    cv2.putText(hud, txt_geom, (cursor_mid, y_center), FONT_MONO, f_sub, c_geom, 1, cv2.LINE_AA)
-
-    # --- 4. Label Global "SHOT" ---
-    shot_label = "SHOT  "
-    tw_shot = cv2.getTextSize(shot_label, FONT_MONO, f_main, 1)[0][0]
-    cursor_mid -= (tw_shot + gap_main)
-    cv2.putText(hud, shot_label, (cursor_mid, y_center), FONT_MONO, f_main, (240, 240, 240), 1, cv2.LINE_AA)
-
-    # ==========================================
-    # 3. DÉTECTIONS AUDIO (Zone Droite)
-    # ==========================================
-    # On commence à quelques pixels du bord droit de la vidéo et on recule
-    cursor_right = total_width - gap_main
-
-    # --- Foule (CROWD) ---
-    crowd_on = getattr(state, 'is_crowd_active', False)
-    c_crowd = (50, 100, 255) if crowd_on else C_OFF
-    crowd_text = "CROWD:ON" if crowd_on else "CROWD:OFF"
-    
-    tw = cv2.getTextSize(crowd_text, FONT_MONO, f_main, 1)[0][0]
-    cursor_right -= tw
-    cv2.putText(hud, crowd_text, (int(cursor_right), y_center), FONT_MONO, f_main, c_crowd, 1, cv2.LINE_AA)
-    
-    # Séparateur
-    cursor_right -= gap_main
-    cv2.putText(hud, "|", (int(cursor_right), y_center), FONT_MONO, f_main, C_OFF, 1, cv2.LINE_AA)
-    cursor_right -= gap_small
-
-    # --- Sifflet (WHISTLE) ---
-    whistle_on = getattr(state, 'is_whistle_active', False)
-    c_whistle = (0, 215, 255) if whistle_on else C_OFF
-    whistle_text = "WHISTLE:ON" if whistle_on else "WHISTLE:OFF"
-    
-    tw = cv2.getTextSize(whistle_text, FONT_MONO, f_main, 1)[0][0]
-    cursor_right -= tw
-    cv2.putText(hud, whistle_text, (int(cursor_right), y_center), FONT_MONO, f_main, c_whistle, 1, cv2.LINE_AA)
-
-    # Label global "AUDIO"
-    audio_label = "AUDIO  "
-    tw = cv2.getTextSize(audio_label, FONT_MONO, f_main, 1)[0][0]
-    cursor_right -= tw
-    cv2.putText(hud, audio_label, (int(cursor_right), y_center), FONT_MONO, f_main, (240, 240, 240), 1, cv2.LINE_AA)
-
-    return hud
-
-# ===========================================================================
-# 3. SIDEBAR DROITE (Minimap Horizontale + Futur Dashboard)
-# ===========================================================================
-
-# ===========================================================================
-# 3. SIDEBAR DROITE (Responsive & 50/50 Pur)
-# ===========================================================================
-
-def build_sidebar(sidebar_h: int, sidebar_w: int, state: MatchState) -> np.ndarray:
-    sidebar = np.full((sidebar_h, sidebar_w, 3), C_BG_DARK, dtype=np.uint8)
-
-    # --- CORRECTION 1 : La base de référence est 900px, pas 400px ---
-    scale_f = sidebar_w / 900.0  
-
-    mg_x = int(sidebar_w * 0.04)
-    mg_y = int(sidebar_h * 0.03)
-    half_h = sidebar_h // 2
-
-    # ==========================================
-    # MOITIÉ HAUTE : MINIMAP
-    # ==========================================
-    title_space = int(40 * scale_f)
-    avail_w = sidebar_w - (mg_x * 2)
-    avail_h = half_h - (mg_y * 2) - title_space
-
-    sc_w = avail_w / COURT_L
-    sc_h = avail_h / COURT_W
-    sc = min(sc_w, sc_h)
-
-    court_px_w = int(COURT_L * sc)
-    court_px_h = int(COURT_W * sc)
-
-    offset_x = mg_x + (avail_w - court_px_w) // 2
-    offset_y = mg_y + title_space
-
-    cv2.rectangle(sidebar, (offset_x, offset_y), (offset_x + court_px_w, offset_y + court_px_h), C_COURT, -1)
-
-    f_title = 0.50 * scale_f
-    f_main = 0.45 * scale_f
-    f_sub = 0.40 * scale_f
-
-    # --- En-tête ---
-    title_y = mg_y + int(15 * scale_f)
-    title_txt = "MINIMAP & DASHBOARD"
-    cv2.putText(sidebar, title_txt, (offset_x, title_y), FONT_MONO, f_title, (240, 240, 245), 1, cv2.LINE_AA)
-    
-    stats_txt = (
-        f"| PLYRS: {len(state.players)} "
-        f"| AVG_SPD: {state.avg_speed_kmh:.1f} KM/H "
-        f"| STD_DEV: {state.std_speed_kmh:.1f}"
-    )
-    tw_title = cv2.getTextSize(title_txt, FONT_MONO, f_title, 1)[0][0]
-    cv2.putText(sidebar, stats_txt, (offset_x + tw_title + int(15 * scale_f), title_y),
-                FONT_MONO, f_sub, C_WARN, 1, cv2.LINE_AA)
-
-    lw = max(1, round(sc * 0.035))
-
-    def court_to_px(x_m, y_m):
-        px = int(x_m * sc) + offset_x
-        py = int(y_m * sc) + offset_y
-        return px, py
-
-    def pline(pts, closed=False):
-        pts_px = np.array([court_to_px(p[0], p[1]) for p in pts], dtype=np.int32)
-        cv2.polylines(sidebar, [pts_px.reshape(-1, 1, 2)], closed, C_LINE, lw, cv2.LINE_AA)
-
-    # --- LIGNES DU TERRAIN ---
-    pline([[0, 0], [COURT_L, 0], [COURT_L, COURT_W], [0, COURT_W]], closed=True)
-    pline([[14.0, 0.0], [14.0, COURT_W]])
-    cx, cy = court_to_px(14.0, 7.5)
-    cv2.circle(sidebar, (cx, cy), int(1.8 * sc), C_LINE, lw, cv2.LINE_AA)
-    
-    pline([[0, 5.05], [5.8, 5.05], [5.8, 9.95], [0, 9.95]], closed=True)
-    pline([[28.0, 5.05], [22.2, 5.05], [22.2, 9.95], [28.0, 9.95]], closed=True)
-    
-    cx_lf_l, cy_lf_l = court_to_px(5.8, 7.5)
-    cv2.circle(sidebar, (cx_lf_l, cy_lf_l), int(1.8 * sc), C_LINE, lw, cv2.LINE_AA)
-    cx_lf_r, cy_lf_r = court_to_px(22.2, 7.5)
-    cv2.circle(sidebar, (cx_lf_r, cy_lf_r), int(1.8 * sc), C_LINE, lw, cv2.LINE_AA)
-    
-    arc_angles = np.linspace(-1.36, 1.36, 25)
-    arc_left = [[1.575 + 6.75 * np.cos(a), 7.5 + 6.75 * np.sin(a)] for a in arc_angles]
-    line_3pt_left = [[0.0, 0.9], [2.99, 0.9]] + arc_left + [[2.99, 14.1], [0.0, 14.1]]
-    pline(line_3pt_left, closed=False)
-    line_3pt_right = [[28.0 - p[0], p[1]] for p in line_3pt_left]
-    pline(line_3pt_right, closed=False)
-    
-    pline([[1.2, 6.9], [1.2, 8.1]])
-    pline([[26.8, 6.9], [26.8, 8.1]])
-    cx_b_l, cy_b_l = court_to_px(1.575, 7.5)
-    cv2.circle(sidebar, (cx_b_l, cy_b_l), max(2, int(0.225 * sc)), C_LINE, lw, cv2.LINE_AA)
-    cx_b_r, cy_b_r = court_to_px(26.425, 7.5)
-    cv2.circle(sidebar, (cx_b_r, cy_b_r), max(2, int(0.225 * sc)), C_LINE, lw, cv2.LINE_AA)
-    
-    # --- FLÈCHE D'ATTAQUE ---
-    target_hoop = getattr(state, 'target_hoop', None)
-    
-    if state.attacking_team_id is not None and target_hoop is not None:
-        center_x = offset_x + (court_px_w // 2)
-        arrow_y = offset_y + court_px_h + int(18 * scale_f)
-        
-        is_attacking_right = (target_hoop[0] > 14.0)
-        dir_sign = 1 if is_attacking_right else -1
-        color = C_TEAM_A if state.attacking_team_id == 0 else C_TEAM_B
-        
-        s_4, s_6, s_10, s_18, s_24 = int(4*scale_f), int(6*scale_f), int(10*scale_f), int(18*scale_f), int(24*scale_f)
-        
-        pts = np.array([
-            [center_x - s_18 * dir_sign, arrow_y - s_4], 
-            [center_x + s_6 * dir_sign,  arrow_y - s_4], 
-            [center_x + s_6 * dir_sign,  arrow_y - s_10],
-            [center_x + s_24 * dir_sign, arrow_y],       
-            [center_x + s_6 * dir_sign,  arrow_y + s_10],
-            [center_x + s_6 * dir_sign,  arrow_y + s_4], 
-            [center_x - s_18 * dir_sign, arrow_y + s_4]  
-        ], np.int32)
-        
-        pts_shadow = pts.copy()
-        pts_shadow[:, 1] += max(1, int(2 * scale_f)) 
-        cv2.fillPoly(sidebar, [pts_shadow], (20, 20, 25), cv2.LINE_AA)
-        cv2.fillPoly(sidebar, [pts], color, cv2.LINE_AA)
-
-    # --- JOUEURS ---
-    dot_r = max(4, int(sc * 0.45))
-    halo_th = max(1, int(2 * scale_f))
-    
-    for track_id, player in state.players.items():
-        if player.court_pos_m is None:
-            continue
-        X_m, Y_m = player.court_pos_m
-        px, py = court_to_px(max(0.0, min(COURT_L, X_m)), max(0.0, min(COURT_W, Y_m)))
-
-        if player.team_id == 0: color = C_TEAM_A
-        elif player.team_id == 1: color = C_TEAM_B
-        else: color = C_NO_TEAM
-
-        cv2.circle(sidebar, (px, py), dot_r, color, -1, cv2.LINE_AA)
-        cv2.circle(sidebar, (px, py), dot_r, (255, 255, 255), halo_th, cv2.LINE_AA) 
-
-        if getattr(player, 'is_open', False):
-            angle_start = (state.frame_idx * 10) % 360
-            angle_end = angle_start + 180
-            cv2.ellipse(sidebar, (px, py), (dot_r + int(5*scale_f), dot_r + int(5*scale_f)), 
-                        0, angle_start, angle_end, (100, 255, 100), halo_th, cv2.LINE_AA)
-
-    cv2.line(sidebar, (0, 0), (0, sidebar_h), (60, 60, 70), max(1, int(2 * scale_f)))
-
-    # ==========================================
-    # ZONE DASHBOARD TACTIQUE (PREMIUM UI)
-    # ==========================================
-    dash_start_y = offset_y + court_px_h + int(45 * scale_f)
-    cv2.line(sidebar, (0, dash_start_y), (sidebar_w, dash_start_y), (80, 80, 90), max(1, int(2 * scale_f)))
-    
-    # --- CORRECTION 2 : Espacement des colonnes revu pour éviter le chevauchement ---
-    COL_LBL = mg_x
-    COL_A   = int(sidebar_w * 0.32)
-    COL_B   = int(sidebar_w * 0.50)
-    COL_ALL = int(sidebar_w * 0.68)
-    COL_DIF = int(sidebar_w * 0.85)
-    
-    y_curr = dash_start_y + int(30 * scale_f)
-    
-    header_color = (130, 130, 140)
-    cv2.putText(sidebar, "METRIQUE", (COL_LBL, y_curr), FONT_MONO, f_sub, header_color, 1, cv2.LINE_AA)
-    cv2.putText(sidebar, "EQUIPE A", (COL_A, y_curr), FONT_MONO, f_sub, C_TEAM_A, 1, cv2.LINE_AA)
-    cv2.putText(sidebar, "EQUIPE B", (COL_B, y_curr), FONT_MONO, f_sub, C_TEAM_B, 1, cv2.LINE_AA)
-    cv2.putText(sidebar, "MATCH",    (COL_ALL, y_curr), FONT_MONO, f_sub, (220, 220, 220), 1, cv2.LINE_AA)
-    cv2.putText(sidebar, "DIFF.",    (COL_DIF, y_curr), FONT_MONO, f_sub, C_WARN, 1, cv2.LINE_AA)
-    
-    cv2.line(sidebar, (mg_x, y_curr + int(15 * scale_f)), (sidebar_w - mg_x, y_curr + int(15 * scale_f)), (50, 50, 60), 1)
-    
-    y_curr += int(40 * scale_f)
-
-    def draw_section(title: str, y: int) -> int:
-        cv2.putText(sidebar, title.upper(), (mg_x, y), FONT_MONO, f_main, (180, 180, 190), 1, cv2.LINE_AA)
-        cv2.line(sidebar, (mg_x, y + int(10 * scale_f)), (mg_x + int(100 * scale_f), y + int(10 * scale_f)), C_WARN, max(1, int(2 * scale_f)))
-        return y + int(35 * scale_f)
-    
-    def draw_row(label: str, val_a: float, val_b: float, val_all: float, y_pos: int, unit: str = "", is_sub: bool = False) -> int:
-        font_scale = 0.35 * scale_f if is_sub else f_sub
-        label_color = (160, 160, 170) if is_sub else (230, 230, 240)
-        val_color = (130, 130, 140) if is_sub else (255, 255, 255)
-        indent = int(25 * scale_f) if is_sub else 0
-        
-        fmt = "{:.1f}" if "m/s2" in unit else "{:.0f}" 
-        
-        str_a = f"{fmt.format(val_a)}{unit}"
-        str_b = f"{fmt.format(val_b)}{unit}"
-        str_all = f"{fmt.format(val_all)}{unit}"
-        
-        diff = val_a - val_b
-        diff_val = round(diff)
-        diff_txt = f"{'+' if diff_val > 0 else ''}{diff_val}"
-        diff_color = (80, 80, 90) if abs(diff_val) == 0 else C_WARN
-
-        cv2.putText(sidebar, label, (COL_LBL + indent, y_pos), FONT_MONO, font_scale, label_color, 1, cv2.LINE_AA)
-        cv2.putText(sidebar, str_a, (COL_A, y_pos), FONT_MONO, font_scale, val_color, 1, cv2.LINE_AA)
-        cv2.putText(sidebar, str_b, (COL_B, y_pos), FONT_MONO, font_scale, val_color, 1, cv2.LINE_AA)
-        cv2.putText(sidebar, str_all, (COL_ALL, y_pos), FONT_MONO, font_scale, val_color, 1, cv2.LINE_AA)
-        
-        if not is_sub:
-            cv2.putText(sidebar, diff_txt, (COL_DIF, y_pos), FONT_MONO, font_scale, diff_color, 1, cv2.LINE_AA)
-
-        return y_pos + int((25 if is_sub else 40) * scale_f)
-
-    m_a = state.team_metrics[0]
-    m_b = state.team_metrics[1]
-    
-    y_curr = draw_section("Performance Athletique", y_curr)
-    
-    y_curr = draw_row("Vitesse Moy.", m_a["avg_speed"], m_b["avg_speed"], state.avg_speed_kmh, y_curr, " km/h")
-    y_curr = draw_row("Ecart-type", m_a["std_speed"], m_b["std_speed"], state.std_speed_kmh, y_curr, " km/h", is_sub=True)
-    y_curr = draw_row("Vitesse Min", m_a["min_speed"], m_b["min_speed"], state.min_speed_kmh, y_curr, " km/h", is_sub=True)
-    y_curr = draw_row("Vitesse Max", m_a["max_speed"], m_b["max_speed"], state.max_speed_kmh, y_curr, " km/h", is_sub=True)
-    y_curr += int(10 * scale_f)
-
-    y_curr = draw_row("Accel. Moy.", m_a["avg_accel"], m_b["avg_accel"], state.avg_accel_ms2, y_curr, " m/s2")
-    y_curr = draw_row("Ecart-type", m_a["std_accel"], m_b["std_accel"], state.std_accel_ms2, y_curr, " m/s2", is_sub=True)
-    y_curr = draw_row("Accel. Min", m_a["min_accel"], m_b["min_accel"], state.min_accel_ms2, y_curr, " m/s2", is_sub=True)
-    y_curr = draw_row("Accel. Max", m_a["max_accel"], m_b["max_accel"], state.max_accel_ms2, y_curr, " m/s2", is_sub=True)
-    
-    y_curr += int(20 * scale_f)
-    
-    y_curr = draw_section("Placement & Spatialisation", y_curr)
-    y_curr = draw_row("Spacing (Aire)", m_a["spacing"], m_b["spacing"], 0, y_curr, " m2")
-    y_curr = draw_row("Dans Raquette", m_a["paint_count"], m_b["paint_count"], m_a["paint_count"] + m_b["paint_count"], y_curr, " jou.")
-
-    y_curr += int(25 * scale_f)
-
-    total_paint = m_a["paint_count"] + m_b["paint_count"]
-    alert_active = total_paint > 4
-    
-    alert_bg = (20, 20, 25)
-    alert_border = C_WARN if alert_active else (60, 60, 70)
-    
-    cv2.rectangle(sidebar, (mg_x, y_curr), (sidebar_w - mg_x, y_curr + int(45 * scale_f)), alert_bg, -1)
-    cv2.rectangle(sidebar, (mg_x, y_curr), (sidebar_w - mg_x, y_curr + int(45 * scale_f)), alert_border, 1)
-
-    alert_txt = f"CHARGES RAQUETTES : {int(total_paint)} JOUEURS"
-    if alert_active:
-        alert_txt += " | ALERTE REBOND"
-        
-    text_color = C_OK if not alert_active else C_WARN
-    cv2.putText(sidebar, alert_txt, (mg_x + int(20 * scale_f), y_curr + int(28 * scale_f)), FONT_MONO, f_sub, text_color, 1, cv2.LINE_AA)
-
-    return sidebar
-
-# ===========================================================================
-# 4. ASSEMBLAGE FINAL
-# ===========================================================================
-
-def render_debug_frame(frame: np.ndarray, state: MatchState, sidebar_w: int, hud_h: int, margin_ratio: float = 1.50) -> np.ndarray:
-    """
-    Assemble la vidéo, le HUD et la Sidebar avec des dimensions dynamiques.
-    Conforme au schéma : Gauche [ HUD + Vidéo ] | Droite [ Sidebar complète ]
-    """
-    h, w = frame.shape[:2]
-
-    # 1. Préparation de la vidéo annotée
-    main = draw_zones_and_masks(frame, state, margin_ratio, mask_palyer=False, mask_net=True)
-    main = draw_detections(main, state, txt_hoop=False, txt_player=True, show_team_crop=True)
-
-    # 2. Création du HUD adaptatif
-    hud = build_top_hud(w, hud_h, state)
-
-    # 3. Assemblage Bloc Gauche (HUD + Vidéo)
-    left_pane = np.vstack([hud, main])
-
-    # 4. Création Bloc Droit (Sidebar). Sa hauteur doit matcher le left_pane.
-    sidebar_h = h + hud_h
-    sidebar = build_sidebar(sidebar_h=sidebar_h, sidebar_w=sidebar_w, state=state)
-
-    # 5. Assemblage final horizontal
-    return np.hstack([left_pane, sidebar])
+# Rétro-compatibilité pour un usage fonctionnel direct si nécessaire
+def render_debug_frame(frame: np.ndarray, state: 'FrameSnapshot', sidebar_w: int, hud_h: int) -> np.ndarray:
+    renderer = MatchRenderer()
+    return renderer.render_frame(frame, state, sidebar_w, hud_h)
