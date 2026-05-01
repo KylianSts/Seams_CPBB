@@ -1,12 +1,8 @@
 """
 segmentation.py
 ---------------
-Module d'extraction de masques au pixel près (SAM 2).
-
-Workflow optimisé :
-  1. Chargement du modèle (1 fois au démarrage).
-  2. Encodage de l'image (1 fois par frame) -> Étape la plus lourde.
-  3. Requêtes de masques via Bounding Boxes (Joueurs ou Panier) -> Instantané.
+Module d'extraction de masques au pixel près via SAM 2.1.
+Gère exclusivement l'inférence par Deep Learning.
 """
 
 import logging
@@ -20,23 +16,19 @@ import torch
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
+# --- Alias de type ---
+BBox = Tuple[float, float, float, float]
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+
 @dataclass
 class SegmentationConfig:
-    """Configuration du modèle SAM 2."""
+    """Configuration matérielle et métier du modèle SAM 2."""
     checkpoint_path: Path = Path("models/weights/sam2.1_hiera_small.pt")
     config_name: str = "configs/sam2.1/sam2.1_hiera_s.yaml"
     device: int = 0
     
-    # Marge d'agrandissement de la BBox du panier pour être sûr de capturer le filet en dessous
     net_margin_ratio: float = 0.03 
 
     @property
@@ -45,19 +37,16 @@ class SegmentationConfig:
 
 
 # ===========================================================================
-# INITIALISATION
+# INITIALISATION ET ENCODAGE
 # ===========================================================================
 
 def load_segmentation_model(config: SegmentationConfig) -> SAM2ImagePredictor:
-    """
-    Charge le modèle SAM 2 en VRAM.
-    À appeler une seule fois dans run_pipeline.py.
-    """
+    """Charge le modèle SAM 2 en mémoire vidéo (VRAM)."""
     logger.info("Chargement du modèle de segmentation (SAM 2)...")
+    
     if not config.checkpoint_path.exists():
         raise FileNotFoundError(f"Poids SAM introuvables : {config.checkpoint_path}")
 
-    # Optimisation PyTorch pour les GPU modernes (Séries RTX 3000/4000)
     if "cuda" in config.torch_device_str and torch.cuda.get_device_properties(config.device).major >= 8:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -69,156 +58,71 @@ def load_segmentation_model(config: SegmentationConfig) -> SAM2ImagePredictor:
     return predictor
 
 
-# ===========================================================================
-# ENCODAGE DE L'IMAGE (Le goulot d'étranglement)
-# ===========================================================================
-
 def encode_frame(predictor: SAM2ImagePredictor, frame_bgr: np.ndarray, config: SegmentationConfig) -> None:
     """
-    Convertit l'image en RGB et calcule ses 'features'. 
-    À appeler strictement UNE SEULE FOIS par frame, avant de demander des masques.
+    Calcule les features de l'image.
+    Doit être appelé une seule fois par frame avant de soumettre des requêtes de masques.
     """
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     
-    # Utilisation d'autocast pour accélérer massivement l'encodage sur GPU
-    with torch.autocast(device_type="cuda" if "cuda" in config.torch_device_str else "cpu", dtype=torch.bfloat16):
+    device_type = "cuda" if "cuda" in config.torch_device_str else "cpu"
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
         predictor.set_image(frame_rgb)
 
 
 # ===========================================================================
-# REQUÊTES DE MASQUES (Rapide)
+# INFÉRENCE DES MASQUES
 # ===========================================================================
 
-import cv2
-import numpy as np
-import torch
-from typing import List, Tuple, Optional
-# (Assure-toi d'importer SAM2ImagePredictor si ce n'est pas déjà fait)
-
 def get_players_masks(
-    player_boxes: List[Tuple[float, float, float, float]], 
-    config: SegmentationConfig,
-    predictor: Optional['SAM2ImagePredictor'] = None, 
-    method: str = "sam",
-    frame_shape: Optional[Tuple[int, int]] = None
+    predictor: SAM2ImagePredictor,
+    player_boxes: List[BBox], 
+    config: SegmentationConfig
 ) -> List[np.ndarray]:
     """
-    Retourne une liste de masques booléens pour chaque joueur.
-    
-    Args:
-        method: "sam" (précis mais lent) ou "ellipse" (approximation ultra-rapide).
-        frame_shape: (Hauteur, Largeur) requis uniquement pour la méthode "ellipse".
+    Retourne les masques booléens des joueurs basés sur leurs Bounding Boxes.
+    Nécessite que `encode_frame` ait été appelé au préalable.
     """
     if not player_boxes:
         return []
 
-    # ==========================================
-    # MÉTHODE 1 : L'APPROXIMATION GÉOMÉTRIQUE (CAPSULE FLOUTÉE)
-    # ==========================================
-    if method == "ellipse" or method == "capsule": 
-        if frame_shape is None:
-            raise ValueError("L'argument 'frame_shape' (H, W) est requis pour la méthode géométrique.")
-            
-        h_img, w_img = frame_shape[:2]
-        masks = []
-        
-        for box in player_boxes:
-            x1, y1, x2, y2 = box
-            
-            # 1. Création d'une toile noire (0)
-            mask = np.zeros((h_img, w_img), dtype=np.uint8)
-            
-            # 2. Dimensions dynamiques
-            box_w = x2 - x1
-            box_h = y2 - y1
-            
-            # Réduction de la largeur (les humains sont plus fins que leur BBox)
-            capsule_w = int(box_w * 0.70) 
-            radius = int(capsule_w / 2)
-            
-            # 3. Calcul des points d'ancrage (Centré horizontalement, ancré en bas)
-            cx = int(x1 + (box_w / 2))
-            
-            # Le bas de la capsule est collé aux pieds (y2)
-            bottom_cy = int(y2 - radius)
-            
-            # Le haut de la capsule s'arrête un peu en dessous du haut de la BBox 
-            top_cy = int(y1 + (box_h * 0.15) + radius) 
-            
-            # Sécurité mathématique si la BBox est très écrasée
-            if top_cy > bottom_cy:
-                top_cy = bottom_cy
+    boxes_array = np.array(player_boxes, dtype=np.float32)
+    device_type = "cuda" if "cuda" in config.torch_device_str else "cpu"
 
-            # 4. Dessin de la Capsule en BLANC PUR (255) sur le fond noir
-            # Cercle du haut (Tête/Épaules)
-            cv2.circle(mask, (cx, top_cy), radius, 255, -1)
-            # Cercle du bas (Pieds)
-            cv2.circle(mask, (cx, bottom_cy), radius, 255, -1)
-            # Rectangle central (Torse/Jambes)
-            cv2.rectangle(mask, (cx - radius, top_cy), (cx + radius, bottom_cy), 255, -1)
-            
-            # 5. FEATHERING (Flou des contours)
-            blur_size = 21 # La taille du flou (doit être un nombre impair)
-            mask_blurred = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
-            
-            # 6. Conversion en flottant (0.0 à 1.0)
-            mask_float = mask_blurred.astype(np.float32) / 255.0
-            
-            masks.append(mask_float)
-            
-        return masks
-
-    # ==========================================
-    # MÉTHODE 2 : LA SEGMENTATION PROFONDE (SAM)
-    # ==========================================
-    elif method == "sam":
-        if predictor is None:
-            raise ValueError("L'objet 'predictor' SAM doit être fourni pour la méthode 'sam'.")
-            
-        boxes_array = np.array(player_boxes, dtype=np.float32)
-
-        with torch.autocast(device_type="cuda" if "cuda" in config.torch_device_str else "cpu", dtype=torch.bfloat16):
-            masks, scores, _ = predictor.predict(
-                point_coords=None, 
-                point_labels=None,
-                box=boxes_array,
-                multimask_output=False
-            )
-        
-        return [mask.squeeze().astype(bool) for mask in masks]
-        
-    else:
-        raise ValueError(f"Méthode de masque inconnue : {method}")
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        masks, _, _ = predictor.predict(
+            point_coords=None, 
+            point_labels=None,
+            box=boxes_array,
+            multimask_output=False
+        )
+    
+    return [mask.squeeze().astype(bool) for mask in masks]
 
 
 def get_net_mask(
     predictor: SAM2ImagePredictor, 
-    hoop_box: Tuple[float, float, float, float], 
+    hoop_box: BBox, 
     img_width: int, 
     img_height: int, 
     config: SegmentationConfig
 ) -> Optional[np.ndarray]:
-    """
-    Prend la boîte de l'arceau, l'agrandit légèrement vers le bas pour inclure le filet,
-    et demande à SAM de le détourer.
-    """
+    """Extrait le masque du filet en extrapolant la zone sous l'arceau."""
     if not hoop_box:
         return None
 
     x1, y1, x2, y2 = hoop_box
     w, h = x2 - x1, y2 - y1
     
-    # On agrandit la boîte (Surtout vers le bas, où se trouve le filet)
     nx1 = max(0, x1 - w * config.net_margin_ratio)
     ny1 = max(0, y1 - h * config.net_margin_ratio)
     nx2 = min(img_width, x2 + w * config.net_margin_ratio)
-    
-    # On descend beaucoup plus bas pour être sûr de choper tout le filet déformé
     ny2 = min(img_height, y2 + h * (config.net_margin_ratio * 5)) 
 
     box_array = np.array([[nx1, ny1, nx2, ny2]], dtype=np.float32)
+    device_type = "cuda" if "cuda" in config.torch_device_str else "cpu"
 
-    with torch.autocast(device_type="cuda" if "cuda" in config.torch_device_str else "cpu", dtype=torch.bfloat16):
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
         masks, _, _ = predictor.predict(
             point_coords=None, 
             point_labels=None,
