@@ -98,7 +98,7 @@ class TeamDetector:
             return None
 
         # Histogramme 2D (Teinte et Saturation)
-        hist = cv2.calcHist([torso_hsv], [0, 1], final_mask, [32, 32], [0, 180, 0, 256])
+        hist = cv2.calcHist([torso_hsv], [0], final_mask, [32], [0, 180])
         cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
         
         return hist.flatten()
