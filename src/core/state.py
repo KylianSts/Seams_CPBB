@@ -1,29 +1,30 @@
 """
 state.py
 --------
-Contient les structures de données (Dataclasses) qui représentent 
-l'état du match à un instant T.
-Agit comme la mémoire centrale ("Blackboard") partagée entre tous les modules.
+Structures de données centrales (Blackboard) pour l'analyse du match.
+Définit l'état immuable (Snapshot) et l'état mutatif (MatchState) utilisé
+tout au long du pipeline de traitement vidéo.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Deque, TYPE_CHECKING
 from collections import deque
 import numpy as np
-import copy
+
+if TYPE_CHECKING:
+    from core.filters import OneEuroFilter
 
 @dataclass
 class FrameSnapshot:
     """
-    Capture 'congelée' de l'état à la frame T.
-    Utilisée par le Look-Ahead Buffer pour dessiner le passé sans subir
-    les modifications du futur.
+    Représentation immuable de l'état du match à une frame précise (T).
+    Utilisé par le Look-Ahead Buffer pour le rendu différé sans risque de mutation.
     """
     frame_idx: int
-    frame_bgr: np.ndarray  # L'image brute (doit être un .copy() strict)
+    frame_bgr: np.ndarray 
     
-    # --- Detections & Tracking ---
-    players: dict          # Copie profonde pour figer les coordonnées et les IDs
+    # --- Détections & Tracking ---
+    players: Dict[int, 'PlayerState']
     ball_bbox_px: Optional[Tuple[float, float, float, float]]
     hoop_bbox_px: Optional[Tuple[float, float, float, float]]
 
@@ -31,12 +32,12 @@ class FrameSnapshot:
     court_keypoints_conf: Optional[np.ndarray]
     
     # --- Masques ---
-    player_masks: list
+    player_masks: List[np.ndarray]
     net_mask: Optional[np.ndarray]
     
     # --- UI & Triggers ---
-    active_triggers: dict
-    shot_scores: dict
+    active_triggers: Dict[str, bool]
+    shot_scores: Dict[str, float]
     
     # --- Réalité Augmentée ---
     ar_alpha_multiplier: float
@@ -47,8 +48,8 @@ class FrameSnapshot:
     is_whistle_active: bool
     is_crowd_active: bool
     
-    # --- Stats Sidebar (Cinématique & Tactique) ---
-    team_metrics: list
+    # --- Analytique & Cinématique ---
+    team_metrics: Dict[int, Dict[str, float]]
     avg_speed_kmh: float
     std_speed_kmh: float
     min_speed_kmh: float
@@ -61,51 +62,87 @@ class FrameSnapshot:
     target_hoop: Optional[Tuple[float, float]]
     attacking_team_id: Optional[int]
 
-    optical_flow_history: list
-    net_area_history: list
+    optical_flow_history: List[float]
+    net_area_history: List[float]
 
     is_perfect_shot: bool = False
+
 
 @dataclass
 class PlayerState:
     """État d'un joueur unique sur la frame courante."""
-    track_id: int                                       # ID unique du joueur (BotSort)
-    bbox_px: Tuple[float, float, float, float]          # [x1, y1, x2, y2] en pixels
-    foot_pos_px: Tuple[float, float]                    # (x, y) des pieds en pixels
-    court_pos_m: Optional[Tuple[float, float]] = None   # (X, Y) en mètres sur terrain FIBA
+    track_id: int
+    bbox_px: Tuple[float, float, float, float]
+    foot_pos_px: Tuple[float, float]
+    court_pos_m: Optional[Tuple[float, float]] = None
     team_id: Optional[int] = None
     has_ball: bool = False
     is_lost: bool = False
     closest_defender_dist_m: Optional[float] = None
     is_open: bool = False
 
-    # --- Cinématique ---
-    # File d'attente pour lisser la trajectoire (fenêtre glissante)
-    pos_history_m: deque = field(default_factory=lambda: deque(maxlen=30))
+    # --- Cinématique & Historique ---
+    pos_history_m: Deque[Tuple[float, float]] = field(default_factory=lambda: deque(maxlen=30))
+    raw_history: Deque[Tuple[int, float, float]] = field(default_factory=lambda: deque(maxlen=40))
     speed_kmh: float = 0.0
     accel_ms2: float = 0.0
-    pos_filter: Any = None
+    
+    # Référence vers l'instance OneEuroFilter (Typage textuel pour éviter l'import circulaire)
+    pos_filter: Optional['OneEuroFilter'] = None
 
-    # --- NOUVEAU : Classification d'Équipe (GMM Bidirectionnel) ---
-    # Stocke les preuves : (frame_idx, proba_A, proba_B, is_isolated)
-    gmm_history: deque = field(default_factory=lambda: deque(maxlen=80))
+    # --- Classification d'Équipe (GMM) ---
+    # Structure : (frame_idx, proba_A, proba_B, occlusion_ratio)
+    gmm_history: Deque[Tuple[int, float, float, float]] = field(default_factory=lambda: deque(maxlen=80))
+
+    def clone(self) -> 'PlayerState':
+        """
+        Crée une copie profonde optimisée de l'état du joueur.
+        Remplace avantageusement `copy.deepcopy` pour les performances de la boucle temps réel.
+        """
+        return PlayerState(
+            track_id=self.track_id,
+            bbox_px=self.bbox_px,
+            foot_pos_px=self.foot_pos_px,
+            court_pos_m=self.court_pos_m,
+            team_id=self.team_id,
+            has_ball=self.has_ball,
+            is_lost=self.is_lost,
+            closest_defender_dist_m=self.closest_defender_dist_m,
+            is_open=self.is_open,
+            pos_history_m=deque(self.pos_history_m, maxlen=self.pos_history_m.maxlen),
+            raw_history=deque(self.raw_history, maxlen=self.raw_history.maxlen),
+            speed_kmh=self.speed_kmh,
+            accel_ms2=self.accel_ms2,
+            pos_filter=self.pos_filter,
+            gmm_history=deque(self.gmm_history, maxlen=self.gmm_history.maxlen)
+        )
+
 
 @dataclass
 class CameraState:
-    """État de la caméra et de l'homographie."""
+    """Représentation géométrique de la caméra par rapport au terrain FIBA."""
     H_matrix: Optional[np.ndarray] = None
     is_stable: bool = False
     stable_frames_count: int = 0
-    kp_filter: Any = None
+    kp_filter: Optional['OneEuroFilter'] = None
+
+    def clone(self) -> 'CameraState':
+        """Copie optimisée de l'état de la caméra."""
+        return CameraState(
+            H_matrix=self.H_matrix.copy() if self.H_matrix is not None else None,
+            is_stable=self.is_stable,
+            stable_frames_count=self.stable_frames_count,
+            kp_filter=self.kp_filter
+        )
 
 
 @dataclass
 class MatchState:
-    """Mémoire centrale du pipeline."""
+    """
+    Blackboard applicatif : mémoire centrale du pipeline de traitement.
+    Contient l'intégralité du contexte nécessaire pour traiter la frame T.
+    """
 
-    # ===========================================================================
-    # 1. DONNÉES DE BASE
-    # ===========================================================================
     frame_idx: int = 0
     camera: CameraState = field(default_factory=CameraState)
     players: Dict[int, PlayerState] = field(default_factory=dict)
@@ -118,47 +155,30 @@ class MatchState:
 
     events: List[str] = field(default_factory=list)
 
-    # ===========================================================================
-    # 2. HISTORIQUES (Pour la détection de tir)
-    # ===========================================================================
-    # ~1.3 sec à 30fps — suffisant pour check_geometric_crossing
-    ball_history: deque = field(default_factory=lambda: deque(maxlen=40))
+    # --- Historiques courts (Validations temporelles) ---
+    ball_history: Deque[Tuple[int, float, float]] = field(default_factory=lambda: deque(maxlen=40))
+    net_area_history: Deque[float] = field(default_factory=lambda: deque(maxlen=40))
+    optical_flow_history: Deque[float] = field(default_factory=lambda: deque(maxlen=40))
 
-    # Fenêtre courte : on compare l'aire actuelle à la moyenne récente
-    net_area_history: deque = field(default_factory=lambda: deque(maxlen=40))
-
-    # Frame précédente en BGR pour get_hoop_optical_flow
     prev_frame_bgr: Optional[np.ndarray] = None
 
-    optical_flow_history: deque = field(default_factory=lambda: deque(maxlen=40))
+    # --- Inférence spatiale (YOLO-Pose) ---
+    court_keypoints_px: Optional[np.ndarray] = None
+    court_keypoints_conf: Optional[np.ndarray] = None
 
-    # ===========================================================================
-    # 4. KEYPOINTS DU TERRAIN (YOLO-Pose)
-    # ===========================================================================
-    court_keypoints_px: Optional[np.ndarray] = None    # Tableau (N, 2)
-    court_keypoints_conf: Optional[np.ndarray] = None  # Tableau (N,) — pour filtrer l'affichage
-
-    # ===========================================================================
-    # 5. DASHBOARD & HUD (Pour render.py)
-    # ===========================================================================
-    active_triggers: dict = field(default_factory=dict)
-    shot_scores: dict = field(default_factory=dict)
+    # --- UI & Triggers ---
+    active_triggers: Dict[str, bool] = field(default_factory=dict)
+    shot_scores: Dict[str, float] = field(default_factory=dict)
     is_whistle_active: bool = False
     is_crowd_active: bool = False
 
-    ar_stable_frames: int = 0          # Compteur de frames depuis que la cam est stable
-    ar_alpha_multiplier: float = 0.0   # Multiplicateur d'opacité (0.0 = invisible, 1.0 = 100%)
+    ar_stable_frames: int = 0
+    ar_alpha_multiplier: float = 0.0
 
-    # ===========================================================================
-    # 6. GESTION DE L'OCCLUSION DE LA BALLE
-    # ===========================================================================
     is_ball_near_hoop_sticky: bool = False
     last_ball_near_hoop_frame: int = -9999
 
-    # ===========================================================================
-    # 7. MÉTRIQUES GLOBALES (Cinématique)
-    # ===========================================================================
-    # 7. MÉTRIQUES GLOBALES (Cinématique)
+    # --- Analytique Globale ---
     avg_speed_kmh: float = 0.0
     std_speed_kmh: float = 0.0
     min_speed_kmh: float = 0.0
@@ -182,24 +202,20 @@ class MatchState:
         }
     })
 
-    # ===========================================================================
-    # 8. TACTIQUE & POSSESSION
-    # ===========================================================================
     attacking_team_id: Optional[int] = None
     target_hoop: Optional[Tuple[float, float]] = None
 
     def take_snapshot(self, current_frame: np.ndarray) -> FrameSnapshot:
         """
-        Crée une copie déconnectée de la mémoire pour le rendu différé.
-        Crucial : On utilise copy() et deepcopy() pour empêcher le buffer
-        d'être modifié par les frames futures.
+        Génère une copie déconnectée (Snapshot) de la mémoire courante.
+        Garantit l'immuabilité des données nécessaires au rendu différé (Look-Ahead).
         """
         return FrameSnapshot(
             frame_idx=self.frame_idx,
-            frame_bgr=current_frame.copy(),  # TRÈS IMPORTANT : fige les pixels
+            frame_bgr=current_frame.copy(),
             
-            # deepcopy fige l'état de chaque objet Player (position, couleur, id)
-            players=copy.deepcopy(self.players), 
+            # Utilisation de la méthode de clonage native (O(N) vs copy.deepcopy)
+            players={tid: player.clone() for tid, player in self.players.items()},
             
             ball_bbox_px=self.ball_bbox_px,
             hoop_bbox_px=self.hoop_bbox_px,
@@ -207,23 +223,22 @@ class MatchState:
             court_keypoints_px=self.court_keypoints_px.copy() if self.court_keypoints_px is not None else None,
             court_keypoints_conf=self.court_keypoints_conf.copy() if self.court_keypoints_conf is not None else None,
             
-            # Sécurisation des masques numpy
             player_masks=[m.copy() if isinstance(m, np.ndarray) else m for m in self.player_masks],
             net_mask=self.net_mask.copy() if self.net_mask is not None else None,
             
-            # Sécurisation des dictionnaires
             active_triggers=self.active_triggers.copy(),
             shot_scores=self.shot_scores.copy(),
             
-            # Valeurs scalaires (copiées par valeur automatiquement)
             ar_alpha_multiplier=self.ar_alpha_multiplier,
             camera_matrix=self.camera.H_matrix.copy() if self.camera.H_matrix is not None else None,
-            camera_stable=getattr(self.camera, 'is_stable_strict', getattr(self.camera, 'is_stable', False)),
+            camera_stable=self.camera.is_stable,
             
             is_whistle_active=self.is_whistle_active,
             is_crowd_active=self.is_crowd_active,
             
-            team_metrics=copy.deepcopy(self.team_metrics),
+            # Copie de premier niveau suffisante pour les métriques scalaires
+            team_metrics={k: v.copy() for k, v in self.team_metrics.items()},
+            
             avg_speed_kmh=self.avg_speed_kmh,
             std_speed_kmh=self.std_speed_kmh,
             min_speed_kmh=self.min_speed_kmh,
