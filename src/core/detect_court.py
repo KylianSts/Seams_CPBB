@@ -2,34 +2,29 @@
 detect_court.py
 ---------------
 Module d'inférence spatiale (Pose Detection) pour le terrain de basket.
-Utilise YOLO-Pose pour extraire les 35 points clés du terrain et calcule 
-la matrice d'homographie (calibration caméra vers monde réel 2D).
-
-Ne gère pas l'historique ni le lissage temporel (c'est le rôle du pipeline).
+Extrait les points clés FIBA via YOLO-Pose et calcule la matrice d'homographie
+(Calibration Caméra -> Monde Réel 2D) avec validation de l'erreur de reprojection.
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Géométrie FIBA (Constantes)
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# GÉOMÉTRIE FIBA ABSOLUE (Constantes Mathématiques)
+# ===========================================================================
 COURT_L, COURT_W = 28.0, 15.0
 X_BASKET, X_FT, X_3PT_START = 1.575, 5.8, 2.99
 Y_CENTER, Y_KEY_HALF, Y_3PT_OFFSET = 7.5, 2.45, 0.9
-R_3PT, R_FT, R_DS = 6.75, 1.8, 1.25
+R_3PT = 6.75
 
-# Mapping manuel des points FIBA (Moitié gauche)
+# Mapping des points FIBA (Moitié gauche)
 _FIBA_M_COORDS = {
     1:  (0.0,  15.0), 2:  (0.0,  15.0 - Y_3PT_OFFSET), 3:  (0.0,  Y_CENTER + Y_KEY_HALF),
     4:  (0.0,  Y_CENTER - Y_KEY_HALF), 5:  (0.0,  Y_3PT_OFFSET), 6:  (0.0,  0.0),
@@ -40,7 +35,7 @@ _FIBA_M_COORDS = {
     17: (14.0, 15.0), 18: (14.0, 7.5), 19: (14.0, 0.0),
 }
 
-# Symétrie pour déduire la moitié droite automatiquement
+# Symétrie pour la moitié droite
 _SYMMETRY_PAIRS_1BASED = [
     (1, 30), (2, 31), (3, 32), (4, 33), (5, 34), (6, 35),
     (7, 28), (8, 29), (9, 26), (10, 27),
@@ -48,14 +43,15 @@ _SYMMETRY_PAIRS_1BASED = [
 ]
 
 def _build_world_coords() -> Dict[int, Tuple[float, float]]:
-    """Génère le dictionnaire {yolo_index: (X_meters, Y_meters)}."""
+    """Construit le dictionnaire de référence {yolo_index: (X_meters, Y_meters)}."""
     custom_id_to_xy = {k: v for k, v in _FIBA_M_COORDS.items()}
     for left_id, right_id in _SYMMETRY_PAIRS_1BASED:
         if left_id in _FIBA_M_COORDS:
             custom_id_to_xy[right_id] = (COURT_L - _FIBA_M_COORDS[left_id][0], _FIBA_M_COORDS[left_id][1])
             
     yolo_to_custom_id = [i for i in range(1, 36) if i not in (15, 16, 17, 18)]
-    # Correction d'inversion spécifique à ton entraînement
+    
+    # Correction d'inversion spécifique à l'entraînement
     idx_19, idx_21 = yolo_to_custom_id.index(19), yolo_to_custom_id.index(21)
     yolo_to_custom_id[idx_19], yolo_to_custom_id[idx_21] = 21, 19
 
@@ -66,33 +62,45 @@ def _build_world_coords() -> Dict[int, Tuple[float, float]]:
 
 WORLD_COORDS = _build_world_coords()
 
+# Les 4 coins du terrain en mètres pour le lissage de l'homographie
+COURT_CORNERS_M = np.array([
+    [0.0, 0.0], [COURT_L, 0.0], [COURT_L, COURT_W], [0.0, COURT_W]
+], dtype=np.float32).reshape(-1, 1, 2)
 
-# ---------------------------------------------------------------------------
-# Configuration & Structures de données
-# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# CONFIGURATION ET STRUCTURES
+# ===========================================================================
+
 @dataclass
 class CourtPoseConfig:
-    """Configuration de l'inférence YOLO-Pose pour le terrain."""
+    """Configuration de l'IA et des règles mathématiques (Homographie)."""
     model_path: Path = Path("models/runs/keypoint_detection/yolo11m-pose_1000ep_v1/weights/best.pt")
-    conf_keypoint: float = 0.50
     device: int = 0
+    
+    # --- Tolérances de l'IA ---
+    conf_keypoint: float = 0.50
+    
+    # --- Sécurités Homographiques ---
+    min_points_required: int = 5    # 4 est le minimum mathématique, 5 offre une redondance
+    ransac_threshold: float = 5.0   # Tolérance d'erreur de reprojection en pixels
+    min_inlier_ratio: float = 0.60  # Rejette la matrice si RANSAC sacrifie plus de 40% des points
 
 
 @dataclass
 class CourtResult:
-    """Conteneur des résultats spatiaux de la frame T."""
-    keypoints_px: Optional[np.ndarray] = None  # Tableau (N, 2) des coordonnées X,Y
-    keypoints_conf: Optional[np.ndarray] = None # Tableau (N,) des confiances
-    homography_matrix: Optional[np.ndarray] = None # Matrice H 3x3
+    """Conteneur des prédictions brutes de la frame T."""
+    keypoints_px: Optional[np.ndarray] = None
+    keypoints_conf: Optional[np.ndarray] = None
 
 
 # ===========================================================================
 # INITIALISATION
 # ===========================================================================
 
-def load_court_detector(config: CourtPoseConfig):
-    """Charge le modèle Ultralytics YOLO-Pose en VRAM."""
-    logger.info(f"Chargement du modèle YOLO-Pose (Terrain)...")
+def load_court_detector(config: CourtPoseConfig) -> Any:
+    """Charge dynamiquement le modèle Ultralytics YOLO-Pose."""
+    logger.info("Chargement du modèle YOLO-Pose (Terrain)...")
     if not config.model_path.exists():
         raise FileNotFoundError(f"Modèle introuvable : {config.model_path.resolve()}")
     
@@ -103,21 +111,16 @@ def load_court_detector(config: CourtPoseConfig):
 
 
 # ===========================================================================
-# INFÉRENCE & MATHÉMATIQUES
+# INFÉRENCE & GÉOMÉTRIE
 # ===========================================================================
 
-def run_court_detection(model, frame: np.ndarray, config: CourtPoseConfig) -> CourtResult:
-    """
-    Extrait les points clés du terrain depuis l'image.
-    Note : Le seuil interne (conf=0.01) est bas pour forcer YOLO à sortir tous les points,
-    le filtrage se fera via config.conf_keypoint lors du calcul de l'homographie.
-    """
+def run_court_detection(model: Any, frame: np.ndarray, config: CourtPoseConfig) -> CourtResult:
+    """Extrait les points clés du terrain depuis l'image."""
     result = CourtResult()
     if model is None or frame is None:
         return result
 
     try:
-        # device=config.device pour garantir l'exécution GPU
         preds = model(frame, device=config.device, verbose=False)
         
         if not preds or preds[0].keypoints is None or preds[0].keypoints.xy.shape[0] == 0:
@@ -132,10 +135,10 @@ def run_court_detection(model, frame: np.ndarray, config: CourtPoseConfig) -> Co
     return result
 
 
-def compute_homography(court_result: CourtResult, config: CourtPoseConfig) -> np.ndarray:
+def compute_homography(court_result: CourtResult, config: CourtPoseConfig) -> Optional[np.ndarray]:
     """
-    Calcule la matrice de transformation 2D (Homographie) entre l'image et le modèle FIBA en mètres.
-    Ne prend en compte que les points avec une confiance > config.conf_keypoint.
+    Calcule la matrice de transformation 2D entre l'image et le modèle FIBA.
+    Intègre une validation stricte du ratio d'Inliers via l'algorithme MAGSAC.
     """
     kp_xy = court_result.keypoints_px
     kp_conf = court_result.keypoints_conf
@@ -143,9 +146,9 @@ def compute_homography(court_result: CourtResult, config: CourtPoseConfig) -> np
     if kp_xy is None or kp_conf is None:
         return None
 
-    src_pts_px = []
-    dst_pts_m = []
+    src_pts_px, dst_pts_m = [], []
 
+    # 1. Filtrage par confiance
     for yolo_idx, world_xy in WORLD_COORDS.items():
         if yolo_idx >= len(kp_conf) or kp_conf[yolo_idx] < config.conf_keypoint:
             continue
@@ -157,64 +160,57 @@ def compute_homography(court_result: CourtResult, config: CourtPoseConfig) -> np
         src_pts_px.append([float(px), float(py)])
         dst_pts_m.append(list(world_xy))
 
-    # Il faut un minimum mathématique de 4 points pour une homographie. 
-    # 5 est une bonne sécurité pour RANSAC.
-    if len(src_pts_px) < 5:
+    if len(src_pts_px) < config.min_points_required:
         return None
 
+    # 2. Calcul robuste (USAC_MAGSAC)
     H, status = cv2.findHomography(
         np.array(src_pts_px, dtype=np.float32), 
         np.array(dst_pts_m, dtype=np.float32), 
         cv2.USAC_MAGSAC, 
-        5.0
+        config.ransac_threshold
     )
     
-    # Normalisation de la matrice (convention mathématique)
-    if H is not None:
-        H = H / H[2, 2]
-        
+    if H is None or status is None:
+        return None
+
+    # 3. Contrôle Qualité (Rejet si la géométrie est absurde)
+    inliers_count = int(np.sum(status))
+    inlier_ratio = inliers_count / len(src_pts_px)
+    
+    if inlier_ratio < config.min_inlier_ratio:
+        logger.debug(f"Homographie rejetée (Inliers: {inlier_ratio:.2f} < {config.min_inlier_ratio})")
+        return None
+    
+    # 4. Normalisation mathématique standard
+    H = H / H[2, 2]
     return H
 
 
-# ===========================================================================
-# STABILISATION VIRTUELLE (Les 4 Coins)
-# ===========================================================================
-
-# Les 4 coins du terrain en mètres (0,0 / 28,0 / 28,15 / 0,15)
-COURT_CORNERS_M = np.array([
-    [0.0, 0.0], 
-    [COURT_L, 0.0], 
-    [COURT_L, COURT_W], 
-    [0.0, COURT_W]
-], dtype=np.float32).reshape(-1, 1, 2)
-
 def smooth_homography(H_raw: np.ndarray, H_old: np.ndarray, alpha: float = 0.10) -> np.ndarray:
     """
-    Lisse une nouvelle matrice d'homographie par rapport à l'ancienne
+    Applique un lissage EMA (Exponential Moving Average) sur l'homographie
     en interpolant la projection des 4 coins du terrain dans l'espace Pixel.
-    Empêche les sauts violents dus au changement de topologie des keypoints.
+    Cette technique garantit une transition géométrique valide (contrairement 
+    à un lissage direct des coefficients de la matrice).
     """
     if H_old is None or H_raw is None:
         return H_raw
         
     try:
-        # 1. On trouve les matrices inverses (Mètres -> Pixels vidéo)
         H_raw_inv = np.linalg.inv(H_raw)
         H_old_inv = np.linalg.inv(H_old)
         
-        # 2. On projette les 4 coins théoriques sur l'image vidéo (en pixels)
         pts_px_new = cv2.perspectiveTransform(COURT_CORNERS_M, H_raw_inv)
         pts_px_old = cv2.perspectiveTransform(COURT_CORNERS_M, H_old_inv)
         
-        # 3. Lissage linéaire (EMA) sur les pixels. 
-        # C'est 100% légal mathématiquement car on lisse des coordonnées 2D d'image.
+        # EMA sur les coordonnées 2D
         pts_px_smooth = (alpha * pts_px_new) + ((1.0 - alpha) * pts_px_old)
         
-        # 4. On recalcule l'Homographie "Parfaite" (Pixels -> Mètres)
-        # On utilise 0 (sans RANSAC) car 4 points définissent exactement 1 seule homographie.
+        # Recalcul d'une homographie parfaite (Sans RANSAC, 4 points = 1 solution exacte)
         H_smooth, _ = cv2.findHomography(pts_px_smooth, COURT_CORNERS_M, 0)
         
         return H_smooth if H_smooth is not None else H_raw
+        
     except np.linalg.LinAlgError:
-        # Sécurité mathématique si une matrice est non-inversible
         return H_raw
