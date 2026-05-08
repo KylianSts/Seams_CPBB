@@ -4,3 +4,6 @@ data/demos/
 data/raw/
 models/
 tests/
+
+__pycache__/
+*.pyc
