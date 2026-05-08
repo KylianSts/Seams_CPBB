@@ -22,17 +22,18 @@ BallHistory = List[Tuple[int, float, float]]  # [(frame_idx, cx, cy), ...]
 
 
 @dataclass
+@dataclass
 class ShotConfig:
     """Configuration centralisée des seuils probabilistes de tir."""
-    
-    # --- Géométrie ---
-    # Pas de paramètre magique pour la géométrie, elle dépend purement de la taille de la BBox.
 
     # --- Physique du Filet (SAM) ---
     net_min_history_frames: int = 10
     net_recent_window: int = 5
     net_baseline_percentile: int = 20      # Centile pour déterminer l'aire "au repos"
     net_expansion_target_ratio: float = 0.50 # On donne un score de 1.0 à partir de 50% d'expansion
+
+    # --- Gestion Temporelle ---
+    shot_cooldown_frames: int = 60         # Délai de repos après un tir réussi
 
     # --- Flux Optique ---
     flow_margin_px: int = 20               # Marge autour de la BBox du panier pour le crop
