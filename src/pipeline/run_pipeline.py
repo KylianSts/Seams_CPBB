@@ -155,8 +155,9 @@ def process_video(
     look_ahead_buffer = deque()
 
     # Registres inter-frames
-    prev_hoop_bbox, prev_court_kp = None, None
+    prev_hoop_bbox = None
     last_shot_frame = -9999
+
     shot_display_left = 0
 
     logger.info(f"Lancement du pipeline principal : {total_frames} frames...")
@@ -187,24 +188,35 @@ def process_video(
             # ---------------------------------------------------------------
             # 2. CAMÉRA ET HOMOGRAPHIE
             # ---------------------------------------------------------------
-            is_stable = is_camera_stable(state.hoop_bbox_px, prev_hoop_bbox, state.court_keypoints_px, prev_court_kp, vid_w, t_cfg)
+            # On vérifie la stabilité par rapport à la frame précédente
+            is_stable = is_camera_stable(prev_hoop=prev_hoop_bbox, curr_hoop=state.hoop_bbox_px, vid_w=vid_w, cfg=t_cfg)
             state.camera.is_stable = is_stable
 
-            if is_stable:
-                state.camera.stable_frames_count += 1
-            else:
+            # CONDITION CORRIGÉE : 
+            # On calcule l'homographie si la caméra bouge 
+            # OU si on n'a pas encore de matrice (pour la première frame)
+            if not is_stable or state.camera.H_matrix is None:
                 state.camera.stable_frames_count = 0
+                
+                # Inférence lourde du terrain
                 court_res = run_court_detection(court_model, frame, court_cfg)
+                
                 if court_res.keypoints_px is not None:
                     state.court_keypoints_px = court_res.keypoints_px
                     state.court_keypoints_conf = court_res.keypoints_conf
                     
+                    # Calcul de la matrice Monde <-> Image
                     H_new = compute_homography(court_res, court_cfg)
                     if H_new is not None:
+                        # Lissage pour éviter les micro-tremblements
                         state.camera.H_matrix = smooth_homography(H_new, state.camera.H_matrix) if state.camera.H_matrix is not None else H_new
+            else:
+                # Si c'est stable, on se contente d'incrémenter le compteur
+                # La matrice et les keypoints restent ceux de la frame précédente
+                state.camera.stable_frames_count += 1
 
+            # Mise à jour du registre pour la prochaine frame
             prev_hoop_bbox = state.hoop_bbox_px
-            if state.court_keypoints_px is not None: prev_court_kp = state.court_keypoints_px.copy()
 
             # ---------------------------------------------------------------
             # 3. TRACKING & ÉQUIPES

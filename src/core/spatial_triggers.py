@@ -31,8 +31,6 @@ class TriggersConfig:
     # --- Trigger Caméra (Validation Croisée) ---
     # Déplacement minimum du panier (en % de la largeur vidéo) pour soupçonner un mouvement de caméra
     cam_hoop_threshold_ratio: float = 0.05 
-    # Déplacement minimum du sol (en % de la largeur vidéo) pour CONFIRMER un mouvement de caméra
-    cam_floor_threshold_ratio: float = 0.002
     
     # --- Trigger Balle (Chute) ---
     falling_window_frames: int = 5
@@ -107,54 +105,34 @@ def get_players_in_ar_zone(
 # ===========================================================================
 
 def is_camera_stable(
-    current_hoop_bbox: Optional[BBox],
-    prev_hoop_bbox: Optional[BBox],
-    current_court_kp: Optional[np.ndarray],
-    prev_court_kp: Optional[np.ndarray],
-    vid_w: int,
+    prev_hoop: Optional[BBox], 
+    curr_hoop: Optional[BBox], 
+    vid_w: int, 
     cfg: TriggersConfig = TriggersConfig()
 ) -> bool:
     """
-    Détermine si la caméra est fixe via une Validation Croisée à 2 niveaux :
-    1. Rapide : Vérifie si le panier (objet statique par excellence) a bougé.
-    2. Profond : Si le panier a bougé (ex: tremblement dû à un dunk), 
-       vérifie si le sol confirme ce mouvement.
+    Détermine si la caméra est stable en se basant UNIQUEMENT 
+    sur le déplacement du panier entre deux frames.
     """
-    hoop_stable = False
-    
-    # --- NIVEAU 1 : Le Panier ---
-    if current_hoop_bbox is not None and prev_hoop_bbox is not None:
-        cx_curr = (current_hoop_bbox[0] + current_hoop_bbox[2]) / 2.0
-        cy_curr = (current_hoop_bbox[1] + current_hoop_bbox[3]) / 2.0
-        cx_prev = (prev_hoop_bbox[0] + prev_hoop_bbox[2]) / 2.0
-        cy_prev = (prev_hoop_bbox[1] + prev_hoop_bbox[3]) / 2.0
+    # S'il n'y a pas de panier visible sur l'une des deux frames, 
+    # on suppose par sécurité que la caméra est stable pour ne pas briser l'AR.
+    if prev_hoop is None or curr_hoop is None:
+        return True 
 
-        dist_ratio = math.hypot(cx_curr - cx_prev, cy_curr - cy_prev) / vid_w
-        
-        if dist_ratio <= cfg.cam_hoop_threshold_ratio:
-            hoop_stable = True
+    # 1. Calcul du centre du panier (Frame N-1)
+    px_c = (prev_hoop[0] + prev_hoop[2]) / 2.0
+    py_c = (prev_hoop[1] + prev_hoop[3]) / 2.0
     
-    if hoop_stable:
-        return True
-        
-    # --- NIVEAU 2 : Le Sol (Validation croisée) ---
-    # Le panier indique un mouvement. Est-ce un artefact (vibration physique) ou un vrai pan de caméra ?
-    if current_court_kp is not None and prev_court_kp is not None:
-        valid_mask = (current_court_kp[:, 0] > 0) & (prev_court_kp[:, 0] > 0)
-        
-        if np.any(valid_mask):
-            pts_curr = current_court_kp[valid_mask]
-            pts_prev = prev_court_kp[valid_mask]
-            
-            distances = np.linalg.norm(pts_curr - pts_prev, axis=1)
-            mean_dist_ratio = float(np.mean(distances)) / vid_w
-            
-            # Si le sol n'a presque pas bougé, la caméra est considérée comme stable.
-            if mean_dist_ratio <= cfg.cam_floor_threshold_ratio:
-                return True 
+    # 2. Calcul du centre du panier (Frame N)
+    cx_c = (curr_hoop[0] + curr_hoop[2]) / 2.0
+    cy_c = (curr_hoop[1] + curr_hoop[3]) / 2.0
 
-    # Si les deux niveaux confirment le mouvement, la caméra bouge.
-    return False
+    # 3. Calcul de la distance parcourue en pixels
+    distance = math.hypot(cx_c - px_c, cy_c - py_c)
+    dist_ratio = distance / vid_w
+
+    # La caméra est considérée comme stable si le déplacement est inférieur au seuil (ex: 5%)
+    return dist_ratio <= cfg.cam_hoop_threshold_ratio
 
 
 def is_ball_falling(
