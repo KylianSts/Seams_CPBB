@@ -30,11 +30,14 @@ class TriggersConfig:
     
     # --- Trigger Caméra (Validation Croisée) ---
     # Déplacement minimum du panier (en % de la largeur vidéo) pour soupçonner un mouvement de caméra
-    cam_hoop_threshold_ratio: float = 0.05 
+    cam_hoop_threshold_ratio: float = 0.01 
     
     # --- Trigger Balle (Chute) ---
     falling_window_frames: int = 5
     falling_min_dy_px: float = 2.0
+
+    # --- Trigger Balle (Altitude) ---
+    altitude_window_frames: int = 20  # On regarde jusqu'à 20 frames en arrière pour trouver le pic
 
 
 # ===========================================================================
@@ -155,3 +158,32 @@ def is_ball_falling(
     
     # Si dy est positif et supérieur au seuil, la balle tombe physiquement sur l'écran.
     return dy > cfg.falling_min_dy_px
+
+
+def has_ball_passed_above_hoop(
+    ball_history: List[Tuple[int, float, float]], 
+    hoop_bbox: Optional[BBox], 
+    cfg: TriggersConfig = TriggersConfig()
+) -> bool:
+    """
+    Filtre d'Altitude (Spatial Gate).
+    Vérifie si la balle s'est trouvée physiquement plus haut que l'arceau 
+    dans son historique récent. Empêche le déclenchement d'un tir si 
+    le ballon est manipulé en dessous du filet (ex: arbitre, rebond bas).
+    """
+    if not ball_history or hoop_bbox is None:
+        return False
+
+    hx1, hy1, hx2, hy2 = hoop_bbox
+
+    # On isole uniquement la fenêtre temporelle qui nous intéresse
+    recent_history = ball_history[-cfg.altitude_window_frames:]
+
+    for _, _, cy in recent_history:
+        # Rappel OpenCV : l'axe Y part de 0 en haut et augmente vers le bas.
+        # Si le centre Y de la balle (cy) est plus petit que le haut du panier (hy1),
+        # alors la balle était "au-dessus" du panier.
+        if cy < hy1:
+            return True
+
+    return False
